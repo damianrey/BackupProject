@@ -1,19 +1,11 @@
-from cryptography.fernet import Fernet
+"""Mantido por compatibilidade. Prefira executar `python generate_key.py`.
 
-# Função para gerar a chave
-def generate_key():
-    key = Fernet.generate_key()
-    return key
+Observação: o BackupProject gera a chave automaticamente na primeira execução.
+"""
 
-# Função para salvar a chave no arquivo
-def save_key_to_file(key, filename):
-    with open(filename, "wb") as file:
-        file.write(key)
+import sys
 
-# Gera a chave
-fernet_key = generate_key()
+from generate_key import main
 
-# Salva a chave em um arquivo
-filename = "fernet.key"
-save_key_to_file(fernet_key, filename)
-print(f"Chave Fernet gerada e salva em '{filename}'.")
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# Build / PyInstaller
+build/
+dist/
+*.spec
+
+# Segredos, locks e logs em tempo de execução
+content/fernet.key
+content/*.lock
+content/*.tmp
+config/*.tmp
+logs/*.log
+logs/*.log.*
+
+# Backups gerados localmente
+mysql/
+sql/
+*.bak
+*.sql
+*.part
