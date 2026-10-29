@@ -12,11 +12,12 @@ Compatibilidade de versões:
 
 import glob
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path, PureWindowsPath
 from typing import List, Optional, Tuple
 
@@ -25,7 +26,7 @@ from .log_config import error_log, exception_log, main_log
 from .paths import BACKUP_LOCK_FILE
 from .security import SecretBox, load_key
 from .settings import (
-    AppSettings, MySQLCredentials, SQLServerCredentials, day_of, load_credentials, load_settings,
+    AppSettings, MySQLCredentials, SQLServerCredentials, load_credentials, load_settings,
 )
 
 MYSQL_FOLDER = "mysql"
@@ -334,7 +335,55 @@ def _dump_mysql(
     return BackupResult("MySQL", database, False, message)
 
 
-def backup_mysql(settings: AppSettings, creds: MySQLCredentials, day: str) -> List[BackupResult]:
+# ---------------------------------------------------------------------------
+# Nomes dos arquivos e retenção
+# ---------------------------------------------------------------------------
+# Os arquivos levam data e hora no nome (banco_2026-10-29_1200.sql), o que permite
+# vários backups por dia. Os antigos são apagados pela retenção, não sobrescritos.
+STAMP_FORMAT = "%Y-%m-%d_%H%M"
+_STAMP_PATTERN = r"(\d{4}-\d{2}-\d{2}_\d{4})"
+
+
+def backup_file_name(database: str, stamp: str, extension: str) -> str:
+    return f"{database}_{stamp}{extension}"
+
+
+def apply_retention(folder: Path, database: str, extension: str, keep_days: int,
+                    now: Optional[datetime] = None) -> int:
+    """Apaga os backups de `database` mais antigos que `keep_days` dias.
+
+    Só considera arquivos no padrão gerado pelo programa e nunca apaga o backup
+    mais recente do banco (mesmo que seja antigo). Retorna quantos foram apagados.
+    """
+    if keep_days <= 0:
+        return 0
+    pattern = re.compile(re.escape(database) + "_" + _STAMP_PATTERN + re.escape(extension) + "$", re.IGNORECASE)
+    backups = []
+    for path in folder.glob(f"{glob.escape(database)}_*{extension}"):
+        match = pattern.match(path.name)
+        if not match:
+            continue
+        try:
+            backups.append((datetime.strptime(match.group(1), STAMP_FORMAT), path))
+        except ValueError:
+            continue
+    backups.sort()
+    limit = (now or datetime.now()) - timedelta(days=keep_days)
+    removed = 0
+    for moment, path in backups[:-1]:  # o mais recente sempre fica
+        if moment >= limit:
+            break
+        try:
+            path.unlink()
+            removed += 1
+        except OSError as exc:
+            error_log.error(f"Não foi possível apagar o backup antigo '{path}': {exc}")
+    if removed:
+        main_log.info(f"Retenção: {removed} backup(s) antigo(s) de {database} apagado(s) em '{folder}'.")
+    return removed
+
+
+def backup_mysql(settings: AppSettings, creds: MySQLCredentials, stamp: str) -> List[BackupResult]:
     if not creds.configured:
         return [BackupResult("MySQL", "-", False, "MySQL: credenciais não configuradas.")]
 
@@ -362,8 +411,11 @@ def backup_mysql(settings: AppSettings, creds: MySQLCredentials, day: str) -> Li
     for database in databases:
         if database.lower() in MYSQL_EXCLUDED_DATABASES:
             continue
-        destination = folder / f"{day}_{database}.sql"
-        results.append(_dump_mysql(mysqldump, creds, database, destination, server_version))
+        destination = folder / backup_file_name(database, stamp, ".sql")
+        result = _dump_mysql(mysqldump, creds, database, destination, server_version)
+        results.append(result)
+        if result.success:  # uma falha nunca apaga os backups anteriores
+            apply_retention(folder, database, ".sql", settings.retention_days)
     if not results:
         results.append(BackupResult("MySQL", "-", False, "MySQL: nenhum banco de dados de usuário encontrado."))
     return results
@@ -524,7 +576,7 @@ def _quote_literal(text: str) -> str:
     return "N'" + text.replace("'", "''") + "'"
 
 
-def backup_sqlserver(settings: AppSettings, creds: SQLServerCredentials, day: str) -> List[BackupResult]:
+def backup_sqlserver(settings: AppSettings, creds: SQLServerCredentials, stamp: str) -> List[BackupResult]:
     database = creds.database
     if not creds.configured:
         return [
@@ -536,7 +588,7 @@ def backup_sqlserver(settings: AppSettings, creds: SQLServerCredentials, day: st
             )
         ]
 
-    file_name = f"{day}_{database}.bak"
+    file_name = backup_file_name(database, stamp, ".bak")
     if settings.sqlserver_backup_dir.strip():
         # Pasta informada como o SQL Server a enxerga (pode ser em outra máquina)
         destination = str(PureWindowsPath(settings.sqlserver_backup_dir.strip()) / file_name)
@@ -546,8 +598,8 @@ def backup_sqlserver(settings: AppSettings, creds: SQLServerCredentials, day: st
         destination = str(folder / file_name)
 
     # Sintaxe T-SQL compatível de SQL Server 2008 até 2019+:
-    # WITH INIT, FORMAT sobrescreve o arquivo em vez de acrescentar um novo backup
-    # ao mesmo .bak a cada semana (o que fazia o arquivo crescer sem limite).
+    # WITH INIT, FORMAT sobrescreve o arquivo (caso dois backups caiam no mesmo
+    # minuto) em vez de acrescentar um novo backup ao mesmo .bak.
     statement = (
         f"BACKUP DATABASE {_quote_identifier(database)} "
         f"TO DISK = {_quote_literal(destination)} WITH INIT, FORMAT"
@@ -580,6 +632,12 @@ def backup_sqlserver(settings: AppSettings, creds: SQLServerCredentials, day: st
                 f"Falha no backup da base de dados {database} do SQL. Erro: {exc}",
             )
         ]
+    # A retenção só roda se esta máquina enxerga o arquivo recém-gravado: é a
+    # garantia de que a pasta local é a mesma em que o SQL Server gravou.
+    if Path(destination).is_file():
+        apply_retention(Path(destination).parent, database, ".bak", settings.retention_days)
+    elif settings.retention_days > 0:
+        main_log.info(f"Retenção do SQL Server ignorada: '{destination}' não é acessível desta máquina.")
     ver_info = f" (versão {sql_version})" if sql_version else ""
     return [
         BackupResult(
@@ -615,11 +673,11 @@ def run_backup(origin: str = "manual") -> BackupReport:
         else:
             box = SecretBox(load_key(create=False))
             creds = load_credentials(box)
-            day = day_of()
+            stamp = report.started.strftime(STAMP_FORMAT)
             if settings.use_mysql:
-                report.results += backup_mysql(settings, creds.mysql, day)
+                report.results += backup_mysql(settings, creds.mysql, stamp)
             if settings.use_sql_server:
-                report.results += backup_sqlserver(settings, creds.sqlserver, day)
+                report.results += backup_sqlserver(settings, creds.sqlserver, stamp)
     except Exception as exc:
         report.error = f"Erro inesperado no backup: {exc}"
         exception_log.exception(report.error)  # traceback completo; a mensagem vai ao error.log abaixo

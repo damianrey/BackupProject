@@ -9,6 +9,8 @@ Arquitetura (substitui o antigo ScheduleThread com `while True`):
   backups nunca rodam em paralelo e a interface nunca congela.
 * O worker executa `backup.run_backup()`, que não acessa widgets.
 * O resultado volta para a interface pelo sinal `backup_finished`.
+* A agenda é uma lista de regras (horários fixos ou intervalo), expandidas em
+  um job semanal por par (dia, horário).
 """
 
 from typing import List, Optional
@@ -18,7 +20,7 @@ from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 
 from .backup import BackupAlreadyRunning, BackupReport, run_backup
 from .log_config import error_log, exception_log, main_log
-from .settings import DAY_LABELS, DAYS, AppSettings
+from .settings import DAY_LABELS, AppSettings, all_slots
 
 _WEEKDAY_JOBS = {
     "Segunda": lambda s: s.every().monday,
@@ -81,19 +83,20 @@ class BackupScheduler(QObject):
 
     # ------------------------------------------------------------------ agenda
     def reload(self, settings: AppSettings) -> List[str]:
-        """Recria os jobs a partir das configurações. Retorna a descrição dos jobs."""
+        """Recria os jobs a partir das regras. Retorna a descrição das regras ativas.
+
+        Cada regra é expandida em pares (dia, horário); pares repetidos entre
+        regras viram um único job, então regras sobrepostas não duplicam backups.
+        """
         self._scheduler.clear()
-        descriptions = []
-        for day in DAYS:
-            day_schedule = settings.days[day]
-            if not day_schedule.enabled:
-                continue
+        for day, time in all_slots(settings.rules):
             try:
-                _WEEKDAY_JOBS[day](self._scheduler).at(day_schedule.time).do(self.trigger, "agendado")
-                descriptions.append(f"{DAY_LABELS[day]} {day_schedule.time}")
+                _WEEKDAY_JOBS[day](self._scheduler).at(time).do(self.trigger, "agendado")
             except schedule.ScheduleError as exc:
-                error_log.error(f"Horário inválido para {day}: '{day_schedule.time}' ({exc}).")
-        main_log.info("Agenda de backups: " + (", ".join(descriptions) or "nenhum dia ativo"))
+                error_log.error(f"Horário inválido para {DAY_LABELS[day]}: '{time}' ({exc}).")
+        descriptions = [rule.describe() for rule in settings.rules if rule.enabled]
+        main_log.info(f"Agenda de backups ({len(self._scheduler.jobs)} horário(s) por semana): "
+                      + ("; ".join(descriptions) or "nenhuma regra ativa"))
         self.schedule_changed.emit()
         return descriptions
 

@@ -7,9 +7,10 @@ from pathlib import Path
 from PyQt5.QtCore import QSize, Qt, QTime, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QFileDialog, QGraphicsOpacityEffect, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QTabWidget, QTimeEdit,
-    QVBoxLayout, QWidget,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QGraphicsOpacityEffect, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QRadioButton, QSpinBox, QTabWidget,
+    QTimeEdit, QVBoxLayout, QWidget,
 )
 
 from . import __version__, startup, users
@@ -19,8 +20,9 @@ from .paths import BASE_DIR, LOGS_DIR, image
 from .scheduler import BackupScheduler
 from .security import CryptoKeyError, SecretBox, load_key
 from .settings import (
-    DAY_LABELS, DAYS, DEFAULT_MYSQL_PORT, DbCredentials, MySQLCredentials, SQLServerCredentials,
-    day_of, load_credentials, load_settings, parse_port, save_credentials, save_settings,
+    DAY_LABELS, DAY_SHORT, DAYS, DEFAULT_MYSQL_PORT, MIN_INTERVAL_MINUTES, MODE_INTERVAL, MODE_TIMES,
+    DbCredentials, MySQLCredentials, ScheduleRule, SQLServerCredentials, day_of, format_interval,
+    load_credentials, load_settings, parse_port, save_credentials, save_settings, upcoming_runs,
 )
 
 ROUNDED_EDIT_STYLE = (
@@ -220,6 +222,173 @@ class RegistrationScreen(QDialog):
             QMessageBox.critical(self, "Erro", f"Não foi possível salvar o usuário:\n{exc}")
             return
         self.accept()
+
+
+# ---------------------------------------------------------------------------
+# Edição de uma regra de agendamento
+# ---------------------------------------------------------------------------
+INTERVAL_CHOICES = (30, 60, 90, 120, 180, 240, 360, 480, 720)  # minutos
+
+
+def format_runs(runs) -> str:
+    return ", ".join(f"{DAY_SHORT[day_of(run)]} {run.strftime('%H:%M')}" for run in runs)
+
+
+class RuleDialog(QDialog):
+    """Cria ou edita uma regra: dias + horários fixos ou intervalo."""
+
+    def __init__(self, rule: "ScheduleRule | None" = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Regra de agendamento")
+        self.setWindowIcon(QIcon(image("system_icon.png")))
+        self.setMinimumWidth(460)
+        rule = rule or ScheduleRule(days=list(DAYS[:5]), times=["12:00"])
+        layout = QVBoxLayout(self)
+
+        # Dias
+        days_box = QGroupBox("Dias")
+        days_layout = QVBoxLayout(days_box)
+        row = QHBoxLayout()
+        self.day_checkboxes = {}
+        for day in DAYS:
+            checkbox = QCheckBox(DAY_SHORT[day])
+            checkbox.setChecked(day in rule.days)
+            checkbox.toggled.connect(self._update_preview)
+            self.day_checkboxes[day] = checkbox
+            row.addWidget(checkbox)
+        days_layout.addLayout(row)
+        presets = QHBoxLayout()
+        for label, days in (("Seg–Sex", DAYS[:5]), ("Fim de semana", DAYS[5:]), ("Todos", DAYS)):
+            button = QPushButton(label)
+            button.clicked.connect(lambda _checked, d=days: self._select_days(d))
+            presets.addWidget(button)
+        presets.addStretch()
+        days_layout.addLayout(presets)
+        layout.addWidget(days_box)
+
+        # Modo
+        self.times_radio = QRadioButton("Horários fixos")
+        self.interval_radio = QRadioButton("Intervalo")
+        mode_group = QButtonGroup(self)
+        mode_group.addButton(self.times_radio)
+        mode_group.addButton(self.interval_radio)
+        modes = QHBoxLayout()
+        modes.addWidget(self.times_radio)
+        modes.addWidget(self.interval_radio)
+        modes.addStretch()
+        layout.addLayout(modes)
+
+        # Horários fixos
+        self.times_box = QGroupBox("Horários")
+        times_layout = QHBoxLayout(self.times_box)
+        self.times_list = QListWidget()
+        self.times_list.setMaximumHeight(110)
+        for time in rule.times_of_day() if rule.mode == MODE_TIMES else []:
+            self.times_list.addItem(time)
+        times_side = QVBoxLayout()
+        self.new_time = QTimeEdit(QTime(12, 0))
+        self.new_time.setDisplayFormat("HH:mm")
+        add_time = QPushButton("Adicionar")
+        add_time.clicked.connect(self._add_time)
+        remove_time = QPushButton("Remover")
+        remove_time.clicked.connect(self._remove_time)
+        for widget in (self.new_time, add_time, remove_time):
+            times_side.addWidget(widget)
+        times_side.addStretch()
+        times_layout.addWidget(self.times_list)
+        times_layout.addLayout(times_side)
+        layout.addWidget(self.times_box)
+
+        # Intervalo
+        self.interval_box = QGroupBox("Intervalo")
+        interval_layout = QGridLayout(self.interval_box)
+        self.interval_combo = QComboBox()
+        for minutes in INTERVAL_CHOICES:
+            self.interval_combo.addItem(f"A cada {format_interval(minutes)}", minutes)
+        if rule.every_minutes not in INTERVAL_CHOICES:
+            self.interval_combo.addItem(f"A cada {format_interval(rule.every_minutes)}", rule.every_minutes)
+        self.interval_combo.setCurrentIndex(self.interval_combo.findData(rule.every_minutes))
+        self.start_time = QTimeEdit(QTime.fromString(rule.start, "HH:mm"))
+        self.end_time = QTimeEdit(QTime.fromString(rule.end, "HH:mm"))
+        for edit in (self.start_time, self.end_time):
+            edit.setDisplayFormat("HH:mm")
+            edit.timeChanged.connect(self._update_preview)
+        self.interval_combo.currentIndexChanged.connect(self._update_preview)
+        interval_layout.addWidget(self.interval_combo, 0, 0, 1, 4)
+        interval_layout.addWidget(QLabel("Das"), 1, 0)
+        interval_layout.addWidget(self.start_time, 1, 1)
+        interval_layout.addWidget(QLabel("às"), 1, 2)
+        interval_layout.addWidget(self.end_time, 1, 3)
+        layout.addWidget(self.interval_box)
+
+        self.preview = QLabel()
+        self.preview.setWordWrap(True)
+        self.preview.setStyleSheet("color: gray;")
+        layout.addWidget(self.preview)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._enabled = rule.enabled
+        self.times_radio.toggled.connect(self._on_mode_changed)
+        (self.interval_radio if rule.mode == MODE_INTERVAL else self.times_radio).setChecked(True)
+        self._on_mode_changed()
+
+    def _select_days(self, days) -> None:
+        for day, checkbox in self.day_checkboxes.items():
+            checkbox.setChecked(day in days)
+
+    def _add_time(self) -> None:
+        time = self.new_time.time().toString("HH:mm")
+        existing = [self.times_list.item(i).text() for i in range(self.times_list.count())]
+        if time not in existing:
+            self.times_list.clear()
+            self.times_list.addItems(sorted(existing + [time]))
+        self._update_preview()
+
+    def _remove_time(self) -> None:
+        for item in self.times_list.selectedItems():
+            self.times_list.takeItem(self.times_list.row(item))
+        self._update_preview()
+
+    def _on_mode_changed(self) -> None:
+        self.times_box.setVisible(self.times_radio.isChecked())
+        self.interval_box.setVisible(self.interval_radio.isChecked())
+        self._update_preview()
+
+    def rule(self) -> ScheduleRule:
+        return ScheduleRule(
+            days=[day for day in DAYS if self.day_checkboxes[day].isChecked()],
+            mode=MODE_INTERVAL if self.interval_radio.isChecked() else MODE_TIMES,
+            times=[self.times_list.item(i).text() for i in range(self.times_list.count())],
+            every_minutes=self.interval_combo.currentData() or MIN_INTERVAL_MINUTES,
+            start=self.start_time.time().toString("HH:mm"),
+            end=self.end_time.time().toString("HH:mm"),
+            enabled=self._enabled,
+        )
+
+    def _update_preview(self) -> None:
+        rule = self.rule()
+        problem = rule.validate()
+        if problem:
+            self.preview.setText(problem)
+            return
+        per_day = len(rule.times_of_day())
+        text = f"{per_day} backup(s) por dia: {', '.join(rule.times_of_day())}"
+        rule.enabled = True
+        runs = upcoming_runs([rule], 3)
+        if runs:
+            text += f"\nPróximos: {format_runs(runs)}"
+        self.preview.setText(text)
+
+    def accept(self) -> None:
+        problem = self.rule().validate()
+        if problem:
+            QMessageBox.warning(self, "Regra de agendamento", problem)
+            return
+        super().accept()
 
 
 # ---------------------------------------------------------------------------
@@ -517,25 +686,42 @@ class MainWindow(QMainWindow):
         tab = _BackgroundTab("schedule2.png")
         layout = QVBoxLayout(tab)
 
-        self.day_checkboxes = {}
-        self.time_edits = {}
-        for day in DAYS:
-            checkbox = QCheckBox(DAY_LABELS[day])
-            time_edit = QTimeEdit()
-            time_edit.setDisplayFormat("HH:mm")  # impossível digitar um horário inválido
-            time_edit.setMaximumWidth(100)
-            time_edit.setEnabled(False)
-            checkbox.toggled.connect(time_edit.setEnabled)
-            self.day_checkboxes[day] = checkbox
-            self.time_edits[day] = time_edit
+        # Regras: cada item tem uma caixa para ativar/desativar sem apagar
+        rules_box = QGroupBox("Regras de agendamento")
+        rules_layout = QHBoxLayout(rules_box)
+        self.rules_list = QListWidget()
+        self.rules_list.setStyleSheet("QListWidget { background: transparent; }")
+        self.rules_list.itemDoubleClicked.connect(lambda _item: self._edit_rule())
+        self.rules_list.itemChanged.connect(lambda _item: self._update_schedule_preview())
+        rules_buttons = QVBoxLayout()
+        for label, slot in (("Adicionar", self._add_rule), ("Editar", self._edit_rule),
+                            ("Remover", self._remove_rule)):
+            button = QPushButton(label)
+            button.clicked.connect(slot)
+            rules_buttons.addWidget(button)
+        rules_buttons.addStretch()
+        rules_buttons.addWidget(icon_label("clock.png", 32))
+        rules_layout.addWidget(self.rules_list)
+        rules_layout.addLayout(rules_buttons)
+        layout.addWidget(rules_box)
+        self._rules = []
 
-            row = QHBoxLayout()
-            checkbox.setMinimumWidth(90)
-            row.addWidget(checkbox)
-            row.addWidget(time_edit)
-            row.addWidget(icon_label("clock.png", 20))
-            row.addStretch()
-            layout.addLayout(row)
+        self.schedule_preview_label = QLabel()
+        self.schedule_preview_label.setWordWrap(True)
+        layout.addWidget(self.schedule_preview_label)
+
+        # Retenção
+        retention = QHBoxLayout()
+        retention.addWidget(QLabel("Manter backups por"))
+        self.retention_spin = QSpinBox()
+        self.retention_spin.setRange(0, 3650)
+        self.retention_spin.setSuffix(" dia(s)")
+        self.retention_spin.setSpecialValueText("sempre (não apagar)")
+        self.retention_spin.setToolTip("Backups mais antigos são apagados após cada backup bem-sucedido.\n"
+                                       "O backup mais recente de cada banco nunca é apagado.")
+        retention.addWidget(self.retention_spin)
+        retention.addStretch()
+        layout.addLayout(retention)
 
         # Bancos a copiar
         self.checkbox_sql_server = QCheckBox("Backup SQL Server")
@@ -565,21 +751,68 @@ class MainWindow(QMainWindow):
         layout.addLayout(buttons)
         return tab
 
+    def _render_rules(self, select: int = -1) -> None:
+        self.rules_list.blockSignals(True)
+        self.rules_list.clear()
+        for rule in self._rules:
+            item = QListWidgetItem(rule.describe())
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if rule.enabled else Qt.Unchecked)
+            self.rules_list.addItem(item)
+        self.rules_list.blockSignals(False)
+        if 0 <= select < len(self._rules):
+            self.rules_list.setCurrentRow(select)
+        self._update_schedule_preview()
+
+    def _sync_rule_states(self) -> None:
+        """Copia o estado das caixas de seleção da lista para as regras."""
+        for row, rule in enumerate(self._rules):
+            rule.enabled = self.rules_list.item(row).checkState() == Qt.Checked
+
+    def _update_schedule_preview(self) -> None:
+        self._sync_rule_states()
+        runs = upcoming_runs(self._rules, 5)
+        self.schedule_preview_label.setText(
+            f"Próximos backups previstos: {format_runs(runs)}" if runs else "Nenhum backup previsto.")
+
+    def _add_rule(self) -> None:
+        dialog = RuleDialog(parent=self)
+        if dialog.exec_() == QDialog.Accepted:
+            self._sync_rule_states()
+            self._rules.append(dialog.rule())
+            self._render_rules(len(self._rules) - 1)
+
+    def _edit_rule(self) -> None:
+        row = self.rules_list.currentRow()
+        if row < 0:
+            return
+        self._sync_rule_states()
+        dialog = RuleDialog(self._rules[row], parent=self)
+        if dialog.exec_() == QDialog.Accepted:
+            self._rules[row] = dialog.rule()
+            self._render_rules(row)
+
+    def _remove_rule(self) -> None:
+        row = self.rules_list.currentRow()
+        if row < 0:
+            return
+        self._sync_rule_states()
+        del self._rules[row]
+        self._render_rules(min(row, len(self._rules) - 1))
+
     def load_schedule(self) -> None:
         settings = load_settings()
-        for day in DAYS:
-            day_schedule = settings.days[day]
-            self.day_checkboxes[day].setChecked(day_schedule.enabled)
-            self.time_edits[day].setEnabled(day_schedule.enabled)
-            self.time_edits[day].setTime(QTime.fromString(day_schedule.time, "HH:mm"))
+        self._rules = settings.rules
+        self._render_rules()
+        self.retention_spin.setValue(settings.retention_days)
         self.checkbox_mysql.setChecked(settings.use_mysql)
         self.checkbox_sql_server.setChecked(settings.use_sql_server)
 
     def save_schedule(self, show_message: bool = True) -> bool:
         settings = load_settings()  # preserva as demais seções (caminhos)
-        for day in DAYS:
-            settings.days[day].enabled = self.day_checkboxes[day].isChecked()
-            settings.days[day].time = self.time_edits[day].time().toString("HH:mm")
+        self._sync_rule_states()
+        settings.rules = self._rules
+        settings.retention_days = self.retention_spin.value()
         settings.use_mysql = self.checkbox_mysql.isChecked()
         settings.use_sql_server = self.checkbox_sql_server.isChecked()
         try:
@@ -595,7 +828,8 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Agendamento",
                                     "Agenda salva, mas nenhum banco (MySQL/SQL Server) está selecionado.")
             else:
-                QMessageBox.information(self, "Agendamento", "Agenda salva: " + (", ".join(jobs) or "nenhum dia ativo"))
+                QMessageBox.information(self, "Agendamento",
+                                        "Agenda salva:\n" + ("\n".join(jobs) or "nenhuma regra ativa"))
         return True
 
     def run_backup_now(self) -> None:
