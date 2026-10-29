@@ -434,13 +434,23 @@ class MainWindow(QMainWindow):
         if not creds.user:
             QMessageBox.information(self, "Testar conexão MySQL", "Preencha ao menos o usuário do MySQL!")
             return
+        version = ""
         try:
             with busy_cursor():
-                connect_mysql(creds).close()
+                conn = connect_mysql(creds)
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT VERSION()")
+                    row = cur.fetchone()
+                    version = str(row[0]) if row and row[0] else ""
+                    cur.close()
+                finally:
+                    conn.close()
         except Exception as exc:
             QMessageBox.critical(self, "Erro", f"Erro ao conectar ao MySQL: {exc}")
             return
-        QMessageBox.information(self, "Testar conexão MySQL", "Conexão com o MySQL bem-sucedida!")
+        details = f"\nVersão do servidor: {version}" if version else ""
+        QMessageBox.information(self, "Testar conexão MySQL", f"Conexão com o MySQL bem-sucedida!{details}")
 
     # Função para testar a conexão com SQL Server
     def test_sql_server_connection(self) -> None:
@@ -452,13 +462,27 @@ class MainWindow(QMainWindow):
         if not creds.server:
             QMessageBox.information(self, "Testar conexão SQL Server", "Preencha ao menos o servidor!")
             return
+        version = ""
         try:
             with busy_cursor():
-                connect_sqlserver(creds).close()
+                conn = connect_sqlserver(creds)
+                try:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT CAST(SERVERPROPERTY('ProductVersion') AS VARCHAR(50)), "
+                        "CAST(SERVERPROPERTY('Edition') AS VARCHAR(100))"
+                    )
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        version = f"{row[0]} ({row[1]})" if row[1] else str(row[0])
+                    cur.close()
+                finally:
+                    conn.close()
         except Exception as exc:
             QMessageBox.critical(self, "Erro", f"Erro ao conectar ao SQL Server: {exc}")
             return
-        QMessageBox.information(self, "Testar conexão SQL Server", "Conexão com o SQL Server bem-sucedida!")
+        details = f"\nVersão do servidor: {version}" if version else ""
+        QMessageBox.information(self, "Testar conexão SQL Server", f"Conexão com o SQL Server bem-sucedida!{details}")
 
     # Função para salvar as credenciais das conexões aos bancos de dados
     def save_credentials(self) -> None:
