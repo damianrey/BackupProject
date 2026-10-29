@@ -18,7 +18,7 @@ from backup_app.security import dpapi_available, write_key
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Gera a chave Fernet do BackupProject.")
+    parser = argparse.ArgumentParser(description="Gera a chave Fernet do DBKeeper.")
     parser.add_argument("--plain", action="store_true", help="não proteger a chave com DPAPI")
     parser.add_argument("--force", action="store_true", help="sobrescrever a chave existente")
     args = parser.parse_args()

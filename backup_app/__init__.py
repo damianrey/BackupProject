@@ -1,4 +1,4 @@
-"""Pacote principal do BackupProject.
+"""Pacote principal do DBKeeper.
 
 Módulos:
     paths       -> caminhos absolutos (independentes do diretório de trabalho)

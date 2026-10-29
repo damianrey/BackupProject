@@ -14,7 +14,7 @@ def _base_dir() -> Path:
     # Executável gerado pelo PyInstaller: a pasta do .exe
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
-    # Execução pelo interpretador: a pasta que contém BackupProject.py
+    # Execução pelo interpretador: a pasta que contém DBKeeper.py
     return Path(__file__).resolve().parent.parent
 
 
@@ -36,7 +36,7 @@ KEY_FILE = CONTENT_DIR / "fernet.key"
 APP_LOCK_FILE = CONTENT_DIR / "app.lock"        # garante uma única instância da interface
 BACKUP_LOCK_FILE = CONTENT_DIR / "backup.lock"  # garante um único backup por vez (entre processos)
 
-ENTRY_SCRIPT = BASE_DIR / "BackupProject.py"
+ENTRY_SCRIPT = BASE_DIR / "DBKeeper.py"
 
 
 def image(name: str) -> str:

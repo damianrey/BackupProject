@@ -6,7 +6,8 @@ from pathlib import Path
 from .paths import ENTRY_SCRIPT
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-VALUE_NAME = "BackupProject"
+VALUE_NAME = "DBKeeper"
+LEGACY_VALUE_NAMES = ("BackupProject",)  # nomes antigos do programa, migrados para VALUE_NAME
 STARTUP_ARG = "--startup"
 
 
@@ -25,23 +26,29 @@ def is_supported() -> bool:
     return sys.platform == "win32"
 
 
-def _registered_value():
+def _registered_value(name: str = VALUE_NAME):
     import winreg
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ) as key:
-            return winreg.QueryValueEx(key, VALUE_NAME)[0]
+            return winreg.QueryValueEx(key, name)[0]
     except FileNotFoundError:
         return None
 
 
+def _has_legacy_value() -> bool:
+    return any(_registered_value(name) is not None for name in LEGACY_VALUE_NAMES)
+
+
 def is_enabled() -> bool:
-    return is_supported() and _registered_value() is not None
+    return is_supported() and (_registered_value() is not None or _has_legacy_value())
 
 
 def is_outdated() -> bool:
-    """True se estiver habilitado, mas apontando para outro caminho/interpretador."""
-    value = _registered_value() if is_supported() else None
-    return value is not None and value != startup_command()
+    """True se estiver habilitado, mas com nome antigo ou apontando para outro caminho/interpretador."""
+    if not is_supported():
+        return False
+    value = _registered_value()
+    return _has_legacy_value() or (value is not None and value != startup_command())
 
 
 def set_enabled(enabled: bool) -> None:
@@ -51,8 +58,8 @@ def set_enabled(enabled: bool) -> None:
     with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
         if enabled:
             winreg.SetValueEx(key, VALUE_NAME, 0, winreg.REG_SZ, startup_command())
-        else:
+        for name in LEGACY_VALUE_NAMES + (() if enabled else (VALUE_NAME,)):
             try:
-                winreg.DeleteValue(key, VALUE_NAME)
+                winreg.DeleteValue(key, name)
             except FileNotFoundError:
                 pass

@@ -2,7 +2,7 @@
 
 Este módulo não usa Qt nem widgets: lê apenas os arquivos de configuração e a
 chave. Por isso pode rodar com segurança em uma thread de segundo plano ou
-direto pela linha de comando (BackupProject.py --backup), por exemplo a
+direto pela linha de comando (DBKeeper.py --backup), por exemplo a
 partir do Agendador de Tarefas do Windows.
 
 Compatibilidade de versões:

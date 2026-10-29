@@ -4,12 +4,13 @@ import hashlib
 import sys
 
 from PyQt5.QtCore import QCoreApplication, QObject, Qt, QTimer
-from PyQt5.QtGui import QColor, QIcon, QPalette
+from PyQt5.QtGui import QIcon
 from PyQt5.QtNetwork import QLocalServer, QLocalSocket
-from PyQt5.QtWidgets import QAction, QApplication, QMenu, QMessageBox, QStyleFactory, QSystemTrayIcon
+from PyQt5.QtWidgets import QAction, QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from . import startup
 from .backup import BackupReport
+from .icons import apply_theme, icon
 from .locks import InterProcessLock
 from .log_config import error_log, main_log
 from .paths import APP_LOCK_FILE, BASE_DIR, image
@@ -17,13 +18,24 @@ from .scheduler import BackupScheduler
 from .settings import DAY_LABELS, day_of, load_settings
 from .ui import LoginScreen, MainWindow
 
-APP_NAME = "BackupProject"
+APP_NAME = "DBKeeper"
 
 
 def _server_name() -> str:
     # Um nome por instalação (pasta), para não conflitar com cópias em outras pastas
     digest = hashlib.sha1(str(BASE_DIR).lower().encode("utf-8")).hexdigest()[:12]
     return f"{APP_NAME}-{digest}"
+
+
+def _set_windows_app_id() -> None:
+    """Sem isso o Windows agrupa a janela sob o python.exe e mostra o ícone do Python na barra de tarefas."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(f"{APP_NAME}.App")
+    except (AttributeError, OSError):
+        pass
 
 
 def notify_running_instance() -> bool:
@@ -37,30 +49,6 @@ def notify_running_instance() -> bool:
     socket.waitForBytesWritten(1000)
     socket.disconnectFromServer()
     return True
-
-
-def apply_theme(app: QApplication) -> None:
-    """Aplica o tema escuro (qdarktheme se disponível; senão, Fusion escuro)."""
-    try:
-        import qdarktheme
-        if hasattr(qdarktheme, "setup_theme"):   # pyqtdarktheme 2.x
-            qdarktheme.setup_theme()
-        else:                                    # pyqtdarktheme 1.x
-            app.setStyleSheet(qdarktheme.load_stylesheet())
-        return
-    except Exception:
-        pass
-    app.setStyle(QStyleFactory.create("Fusion"))
-    palette = QPalette()
-    dark, base, text = QColor(45, 45, 48), QColor(30, 30, 30), QColor(220, 220, 220)
-    for role, color in (
-        (QPalette.Window, dark), (QPalette.WindowText, text), (QPalette.Base, base),
-        (QPalette.AlternateBase, dark), (QPalette.Text, text), (QPalette.Button, dark),
-        (QPalette.ButtonText, text), (QPalette.ToolTipBase, dark), (QPalette.ToolTipText, text),
-        (QPalette.Highlight, QColor(42, 130, 218)), (QPalette.HighlightedText, Qt.black),
-    ):
-        palette.setColor(role, color)
-    app.setPalette(palette)
 
 
 class BackupApplication(QObject):
@@ -132,13 +120,13 @@ class BackupApplication(QObject):
             self.show_login()
             return
 
-        self.tray = QSystemTrayIcon(QIcon(image("system_icon.png")), self)
+        self.tray = QSystemTrayIcon(QIcon(image("app_icon.ico")), self)
 
-        open_action = QAction("Abrir", self)
+        open_action = QAction(icon("open"), "Abrir", self)
         open_action.triggered.connect(self.show_login)
-        backup_action = QAction("Backup", self)
+        backup_action = QAction(icon("run"), "Executar backup", self)
         backup_action.triggered.connect(self.backup_now)
-        close_action = QAction("Sair", self)
+        close_action = QAction(icon("quit"), "Sair", self)
         close_action.triggered.connect(self.request_quit)
 
         self._tray_menu = QMenu()
@@ -230,9 +218,10 @@ class BackupApplication(QObject):
 def run_gui(start_hidden: bool) -> int:
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    _set_windows_app_id()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
-    app.setWindowIcon(QIcon(image("system_icon.png")))
+    app.setWindowIcon(QIcon(image("app_icon.ico")))
     # As janelas apenas se escondem; o programa só termina pelo menu "Sair" da bandeja
     app.setQuitOnLastWindowClosed(False)
 

@@ -5,16 +5,17 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from PyQt5.QtCore import QSize, Qt, QTime, QTimer, pyqtSignal
-from PyQt5.QtGui import QIcon, QPixmap
+from PyQt5.QtGui import QFont, QIcon
 from PyQt5.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-    QGraphicsOpacityEffect, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QMainWindow, QMessageBox, QPushButton, QRadioButton, QSpinBox, QTabWidget,
-    QTimeEdit, QVBoxLayout, QWidget,
+    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMainWindow, QMessageBox, QPushButton, QRadioButton, QSpinBox, QStackedWidget, QTimeEdit,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import __version__, startup, users
 from .backup import connect_mysql, connect_sqlserver, find_mysqldump
+from .icons import ACCENT, ON_ACCENT, icon, tab_icon
 from .log_config import error_log, main_log
 from .paths import BASE_DIR, LOGS_DIR, image
 from .scheduler import BackupScheduler
@@ -25,20 +26,64 @@ from .settings import (
     load_credentials, load_settings, parse_port, save_credentials, save_settings, upcoming_runs,
 )
 
-ROUNDED_EDIT_STYLE = (
-    "QLineEdit { border: 2px solid gray; border-radius: 10px; padding: 0 8px; "
-    "width: 200px; height: 30px; }"
-)
-
 
 # ---------------------------------------------------------------------------
 # Utilitários
 # ---------------------------------------------------------------------------
-def icon_label(name: str, size: int = 40, tooltip: str = "") -> QLabel:
+def icon_label(name: str, size: int = 16, tooltip: str = "") -> QLabel:
     label = QLabel()
-    label.setPixmap(QIcon(image(name)).pixmap(size, size))
+    label.setPixmap(icon(name).pixmap(size, size))
     label.setToolTip(tooltip)
     return label
+
+
+def muted_label(text: str = "") -> QLabel:
+    label = QLabel(text)
+    label.setProperty("muted", True)
+    label.setWordWrap(True)
+    return label
+
+
+def make_field(icon_name: str, placeholder: str, password: bool = False) -> QLineEdit:
+    """Campo de texto com o ícone dentro, à esquerda (e botão de mostrar senha)."""
+    edit = QLineEdit()
+    edit.setPlaceholderText(placeholder)
+    edit.setToolTip(placeholder)
+    edit.addAction(icon(icon_name), QLineEdit.LeadingPosition)
+    if password:
+        edit.setEchoMode(QLineEdit.Password)
+        reveal = edit.addAction(icon("show"), QLineEdit.TrailingPosition)
+        reveal.setToolTip("Mostrar senha")
+
+        def toggle() -> None:
+            hidden = edit.echoMode() == QLineEdit.Password
+            edit.setEchoMode(QLineEdit.Normal if hidden else QLineEdit.Password)
+            reveal.setIcon(icon("hide" if hidden else "show"))
+            reveal.setToolTip("Ocultar senha" if hidden else "Mostrar senha")
+
+        reveal.triggered.connect(toggle)
+    return edit
+
+
+def make_button(text: str, icon_name: str, slot=None, primary: bool = False) -> QPushButton:
+    button = QPushButton(text)
+    button.setIcon(icon(icon_name, ON_ACCENT, ON_ACCENT) if primary else icon(icon_name))
+    button.setIconSize(QSize(16, 16))
+    if primary:
+        button.setProperty("primary", True)
+    if slot is not None:
+        button.clicked.connect(slot)
+    return button
+
+
+def make_icon_button(icon_name: str, tooltip: str, slot) -> QPushButton:
+    button = QPushButton()
+    button.setIcon(icon(icon_name))
+    button.setIconSize(QSize(16, 16))
+    button.setToolTip(tooltip)
+    button.setFixedWidth(36)
+    button.clicked.connect(slot)
+    return button
 
 
 @contextmanager
@@ -79,47 +124,42 @@ class LoginScreen(QMainWindow):
         super().__init__()
 
         # Define o titulo da tela e o tamanho fixo
-        self.setWindowTitle("Tela de Login")
-        self.setFixedSize(400, 240)
-        self.setWindowIcon(QIcon(image("system_icon.png")))
+        self.setWindowTitle("DBKeeper - Login")
+        self.setFixedSize(340, 300)
+        self.setWindowIcon(QIcon(image("app_icon.ico")))
 
-        # ícone do usuário + campo de usuário
-        self.username_label = icon_label("user_icon.png", 56)
-        self.username_entry = QLineEdit()
-        self.username_entry.setPlaceholderText("Usuário")
-        self.username_entry.setStyleSheet(ROUNDED_EDIT_STYLE)
+        # Cabeçalho: ícone do programa + nome
+        logo = QLabel()
+        logo.setPixmap(QIcon(image("app_icon.ico")).pixmap(48, 48))
+        title = QLabel("DBKeeper")
+        title_font = QFont(title.font())
+        title_font.setPointSize(14)
+        title_font.setBold(True)
+        title.setFont(title_font)
+
+        self.username_entry = make_field("user", "Usuário")
         self.username_entry.returnPressed.connect(self.password_entry_focus)
 
-        # Ícone da senha + campo de senha
-        self.password_label = icon_label("password_icon.png", 56)
-        self.password_entry = QLineEdit()
-        self.password_entry.setPlaceholderText("Senha")
-        self.password_entry.setEchoMode(QLineEdit.Password)
-        self.password_entry.setStyleSheet(ROUNDED_EDIT_STYLE)
+        self.password_entry = make_field("password", "Senha", password=True)
         self.password_entry.returnPressed.connect(self.login)
 
-        # Botão para login
-        self.login_button = QPushButton(" ")
-        self.login_button.setIcon(QIcon(image("login_icon.png")))
-        self.login_button.setIconSize(QSize(32, 32))
-        self.login_button.clicked.connect(self.login)
+        self.login_button = make_button("Entrar", "login", self.login, primary=True)
 
         # Botão de primeiro cadastro: só aparece enquanto não existir nenhum usuário.
         # (O antigo atalho Ctrl+R permitia que qualquer pessoa criasse um usuário.)
-        self.first_user_button = QPushButton("Criar primeiro usuário")
-        self.first_user_button.clicked.connect(self.open_first_registration)
+        self.first_user_button = make_button("Criar primeiro usuário", "register", self.open_first_registration)
+        self.first_user_button.setFlat(True)
+        self.first_user_button.setIcon(icon("register", ACCENT))
 
         layout = QVBoxLayout()
-        layout.addStretch(1)
-        user_layout = QHBoxLayout()
-        user_layout.addWidget(self.username_label)
-        user_layout.addWidget(self.username_entry)
-        layout.addLayout(user_layout)
-        pass_layout = QHBoxLayout()
-        pass_layout.addWidget(self.password_label)
-        pass_layout.addWidget(self.password_entry)
-        layout.addLayout(pass_layout)
-        layout.addWidget(self.login_button, alignment=Qt.AlignHCenter)
+        layout.setContentsMargins(32, 24, 32, 24)
+        layout.setSpacing(10)
+        layout.addWidget(logo, alignment=Qt.AlignHCenter)
+        layout.addWidget(title, alignment=Qt.AlignHCenter)
+        layout.addSpacing(8)
+        layout.addWidget(self.username_entry)
+        layout.addWidget(self.password_entry)
+        layout.addWidget(self.login_button)
         layout.addWidget(self.first_user_button, alignment=Qt.AlignHCenter)
         layout.addStretch(1)
 
@@ -182,26 +222,22 @@ class LoginScreen(QMainWindow):
 class RegistrationScreen(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Tela de Registro")
-        self.setFixedSize(400, 220)
-        self.setWindowIcon(QIcon(image("system_icon.png")))
+        self.setWindowTitle("Novo usuário")
+        self.setFixedSize(360, 200)
+        self.setWindowIcon(QIcon(image("app_icon.ico")))
 
-        self.new_username_entry = QLineEdit()
-        self.new_username_entry.setPlaceholderText("Novo usuário")
-
-        self.new_password_entry = QLineEdit()
-        self.new_password_entry.setPlaceholderText(f"Nova senha (mínimo {users.MIN_PASSWORD_LENGTH} caracteres)")
-        self.new_password_entry.setEchoMode(QLineEdit.Password)
-
-        self.confirm_password_entry = QLineEdit()
-        self.confirm_password_entry.setPlaceholderText("Confirme a senha")
-        self.confirm_password_entry.setEchoMode(QLineEdit.Password)
+        self.new_username_entry = make_field("user", "Novo usuário")
+        self.new_password_entry = make_field(
+            "password", f"Nova senha (mínimo {users.MIN_PASSWORD_LENGTH} caracteres)", password=True)
+        self.confirm_password_entry = make_field("password", "Confirme a senha", password=True)
         self.confirm_password_entry.returnPressed.connect(self.register_user)
 
-        self.register_button = QPushButton("Registrar")
-        self.register_button.clicked.connect(self.register_user)
+        self.register_button = make_button("Registrar", "register", self.register_user, primary=True)
+        self.register_button.setAutoDefault(False)  # o Enter já é tratado pelo returnPressed
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
         layout.addWidget(self.new_username_entry)
         layout.addWidget(self.new_password_entry)
         layout.addWidget(self.confirm_password_entry)
@@ -240,10 +276,11 @@ class RuleDialog(QDialog):
     def __init__(self, rule: "ScheduleRule | None" = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Regra de agendamento")
-        self.setWindowIcon(QIcon(image("system_icon.png")))
+        self.setWindowIcon(QIcon(image("app_icon.ico")))
         self.setMinimumWidth(460)
         rule = rule or ScheduleRule(days=list(DAYS[:5]), times=["12:00"])
         layout = QVBoxLayout(self)
+        layout.setSpacing(12)
 
         # Dias
         days_box = QGroupBox("Dias")
@@ -288,10 +325,8 @@ class RuleDialog(QDialog):
         times_side = QVBoxLayout()
         self.new_time = QTimeEdit(QTime(12, 0))
         self.new_time.setDisplayFormat("HH:mm")
-        add_time = QPushButton("Adicionar")
-        add_time.clicked.connect(self._add_time)
-        remove_time = QPushButton("Remover")
-        remove_time.clicked.connect(self._remove_time)
+        add_time = make_button("Adicionar", "add", self._add_time)
+        remove_time = make_button("Remover", "remove", self._remove_time)
         for widget in (self.new_time, add_time, remove_time):
             times_side.addWidget(widget)
         times_side.addStretch()
@@ -321,9 +356,7 @@ class RuleDialog(QDialog):
         interval_layout.addWidget(self.end_time, 1, 3)
         layout.addWidget(self.interval_box)
 
-        self.preview = QLabel()
-        self.preview.setWordWrap(True)
-        self.preview.setStyleSheet("color: gray;")
+        self.preview = muted_label()
         layout.addWidget(self.preview)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -394,52 +427,52 @@ class RuleDialog(QDialog):
 # ---------------------------------------------------------------------------
 # Janela principal
 # ---------------------------------------------------------------------------
-class _BackgroundTab(QWidget):
-    """Aba com uma imagem semitransparente ao fundo que acompanha o redimensionamento."""
-
-    def __init__(self, image_name: str, size: int = 350, opacity: float = 0.7):
-        super().__init__()
-        self._background = QLabel(self)
-        self._background.setPixmap(QPixmap(image(image_name)).scaled(size, size, Qt.KeepAspectRatio,
-                                                                      Qt.SmoothTransformation))
-        self._background.setAlignment(Qt.AlignRight | Qt.AlignTop)
-        self._background.setAttribute(Qt.WA_TransparentForMouseEvents)
-        effect = QGraphicsOpacityEffect(self._background)
-        effect.setOpacity(opacity)
-        self._background.setGraphicsEffect(effect)
-        self._background.lower()
-
-    def resizeEvent(self, event) -> None:
-        self._background.setGeometry(0, 25, self.width(), max(0, self.height() - 50))
-        super().resizeEvent(event)
-
-
 class MainWindow(QMainWindow):
     def __init__(self, scheduler: BackupScheduler):
         super().__init__()
         self.scheduler = scheduler
 
-        self.setWindowTitle("BackupProject")
-        self.setWindowIcon(QIcon(image("system_icon.png")))
+        self.setWindowTitle("DBKeeper")
+        self.setWindowIcon(QIcon(image("app_icon.ico")))
         self.setMinimumSize(780, 560)
-
-        # Abas na lateral esquerda, só com ícones
-        self.tabs = QTabWidget(self)
-        self.tabs.setTabPosition(QTabWidget.West)
-        self.tabs.setIconSize(QSize(32, 32))
 
         self.settings_tab = self._build_connections_tab()
         self.schedule_tab = self._build_schedule_tab()
         self.system_tab = self._build_system_tab()
 
-        for widget, icon, tooltip in (
-            (self.settings_tab, "config.png", "Conexões"),
-            (self.schedule_tab, "schedule.png", "Agendamento"),
-            (self.system_tab, "monitor.png", "Sistema"),
-        ):
-            index = self.tabs.addTab(widget, QIcon(image(icon)), "")
-            self.tabs.setTabToolTip(index, tooltip)
-        self.setCentralWidget(self.tabs)
+        # Barra lateral só com ícones (botões exclusivos) + páginas empilhadas
+        self.pages = QStackedWidget()
+        sidebar = QWidget()
+        sidebar.setObjectName("sidebar")
+        sidebar.setAttribute(Qt.WA_StyledBackground, True)
+        nav = QVBoxLayout(sidebar)
+        nav.setContentsMargins(0, 8, 0, 8)
+        nav.setSpacing(4)
+        self.nav_buttons = QButtonGroup(self)
+        self.nav_buttons.idClicked.connect(self.pages.setCurrentIndex)
+        for index, (widget, icon_name, tooltip) in enumerate((
+            (self.settings_tab, "connections", "Conexões"),
+            (self.schedule_tab, "schedule", "Agendamento"),
+            (self.system_tab, "system", "Sistema"),
+        )):
+            self.pages.addWidget(widget)
+            button = QToolButton()
+            button.setIcon(tab_icon(icon_name))
+            button.setIconSize(QSize(24, 24))
+            button.setToolTip(tooltip)
+            button.setCheckable(True)
+            button.setChecked(index == 0)
+            self.nav_buttons.addButton(button, index)
+            nav.addWidget(button)
+        nav.addStretch(1)
+
+        central = QWidget()
+        root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(sidebar)
+        root.addWidget(self.pages, 1)
+        self.setCentralWidget(central)
 
         # Atualização do status de agendamento
         self.scheduler.schedule_changed.connect(self.refresh_status)
@@ -466,79 +499,77 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ helpers de layout
     @staticmethod
-    def _add_field(grid: QGridLayout, row: int, icon: str, placeholder: str,
+    def _add_field(layout: QVBoxLayout, icon_name: str, placeholder: str,
                    password: bool = False) -> QLineEdit:
-        edit = QLineEdit()
-        edit.setPlaceholderText(placeholder)
-        edit.setToolTip(placeholder)
-        if password:
-            edit.setEchoMode(QLineEdit.Password)
-        grid.addWidget(icon_label(icon, 40, placeholder), row, 0)
-        grid.addWidget(edit, row, 1, 1, 2)
+        edit = make_field(icon_name, placeholder, password)
+        layout.addWidget(edit)
         return edit
 
     @staticmethod
-    def _add_path_field(grid: QGridLayout, row: int, icon: str, placeholder: str, on_browse) -> QLineEdit:
-        edit = QLineEdit()
-        edit.setPlaceholderText(placeholder)
-        edit.setToolTip(placeholder)
-        browse = QPushButton("...")
-        browse.setMaximumWidth(40)
-        browse.clicked.connect(on_browse)
-        grid.addWidget(icon_label(icon, 40, placeholder), row, 0)
-        grid.addWidget(edit, row, 1)
-        grid.addWidget(browse, row, 2)
+    def _add_path_field(layout: QVBoxLayout, icon_name: str, placeholder: str, on_browse) -> QLineEdit:
+        edit = make_field(icon_name, placeholder)
+        row = QHBoxLayout()
+        row.addWidget(edit)
+        row.addWidget(make_icon_button("browse", "Procurar...", on_browse))
+        layout.addLayout(row)
         return edit
+
+    @staticmethod
+    def _footer(*buttons: QPushButton) -> QHBoxLayout:
+        """Linha de botões alinhada à direita, no rodapé da aba."""
+        row = QHBoxLayout()
+        row.addStretch(1)
+        for button in buttons:
+            row.addWidget(button)
+        return row
 
     # ================================================================== Aba Conexões
     def _build_connections_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        layout.setContentsMargins(16, 12, 16, 16)
+        layout.setSpacing(16)
         groups = QHBoxLayout()
+        groups.setSpacing(20)
 
         # MySQL
         mysql_box = QGroupBox("MySQL")
-        grid = QGridLayout(mysql_box)
-        self.mysql_host = self._add_field(grid, 0, "server_icon.png", "MySQL Host (padrão: localhost)")
-        self.mysql_username = self._add_field(grid, 1, "db_user.png", "MySQL Username")
-        self.mysql_password = self._add_field(grid, 2, "database_password2.png", "MySQL Password", True)
-        self.mysql_port = self._add_field(grid, 3, "port_icon.png", f"MySQL Port (padrão: {DEFAULT_MYSQL_PORT})")
-        self.mysqldump_path = self._add_path_field(grid, 4, "config.png", "Caminho do mysqldump.exe",
+        box = QVBoxLayout(mysql_box)
+        self.mysql_host = self._add_field(box, "server", "Host (padrão: localhost)")
+        self.mysql_username = self._add_field(box, "user", "Usuário")
+        self.mysql_password = self._add_field(box, "password", "Senha", True)
+        self.mysql_port = self._add_field(box, "port", f"Porta (padrão: {DEFAULT_MYSQL_PORT})")
+        self.mysqldump_path = self._add_path_field(box, "executable", "Caminho do mysqldump.exe",
                                                    self._browse_mysqldump)
-        self.test_mysql_button = QPushButton("Testar Conexão MySQL")
-        self.test_mysql_button.clicked.connect(self.test_mysql_connection)
-        grid.addWidget(self.test_mysql_button, 5, 0, 1, 3)
+        box.addStretch(1)
+        self.test_mysql_button = make_button("Testar conexão", "test", self.test_mysql_connection)
+        box.addWidget(self.test_mysql_button)
         groups.addWidget(mysql_box)
 
         # SQL Server
         sql_box = QGroupBox("SQL Server")
-        grid = QGridLayout(sql_box)
-        self.sql_server = self._add_field(grid, 0, "server_icon.png", "SQL Server (ex.: localhost\\SQLEXPRESS)")
-        self.sql_username = self._add_field(grid, 1, "db_user.png", "SQL Username (vazio = autenticação do Windows)")
-        self.sql_password = self._add_field(grid, 2, "database_password2.png", "SQL Password", True)
-        self.sql_database = self._add_field(grid, 3, "database_icon.png", "SQL Database")
-        self.sql_port = self._add_field(grid, 4, "port_icon.png", "SQL Port (opcional)")
+        box = QVBoxLayout(sql_box)
+        self.sql_server = self._add_field(box, "server", "Servidor (ex.: localhost\\SQLEXPRESS)")
+        self.sql_username = self._add_field(box, "user", "Usuário (vazio = autenticação do Windows)")
+        self.sql_password = self._add_field(box, "password", "Senha", True)
+        self.sql_database = self._add_field(box, "database", "Banco de dados")
+        self.sql_port = self._add_field(box, "port", "Porta (opcional)")
         self.sqlserver_backup_dir = self._add_path_field(
-            grid, 5, "config.png", "Pasta de backup no servidor (opcional)", self._browse_sqlserver_dir)
-        self.test_sql_server_button = QPushButton("Testar Conexão SQL Server")
-        self.test_sql_server_button.clicked.connect(self.test_sql_server_connection)
-        grid.addWidget(self.test_sql_server_button, 6, 0, 1, 3)
+            box, "folder", "Pasta de backup no servidor (opcional)", self._browse_sqlserver_dir)
+        box.addStretch(1)
+        self.test_sql_server_button = make_button("Testar conexão", "test", self.test_sql_server_connection)
+        box.addWidget(self.test_sql_server_button)
         groups.addWidget(sql_box)
 
         layout.addLayout(groups)
-
-        note = QLabel(
+        layout.addWidget(muted_label(
             "A pasta de backup do SQL Server é o caminho visto pelo próprio servidor SQL; "
             "a conta do serviço precisa ter permissão de escrita nela."
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet("color: gray;")
-        layout.addWidget(note)
+        ))
         layout.addStretch(1)
 
-        self.save_button = QPushButton("Salvar Configurações")
-        self.save_button.clicked.connect(self.save_credentials)
-        layout.addWidget(self.save_button)
+        self.save_button = make_button("Salvar configurações", "save", self.save_credentials, primary=True)
+        layout.addLayout(self._footer(self.save_button))
         return tab
 
     def _browse_mysqldump(self) -> None:
@@ -683,31 +714,28 @@ class MainWindow(QMainWindow):
 
     # ================================================================== Aba Agendamento
     def _build_schedule_tab(self) -> QWidget:
-        tab = _BackgroundTab("schedule2.png")
+        tab = QWidget()
         layout = QVBoxLayout(tab)
+        layout.setContentsMargins(16, 12, 16, 16)
+        layout.setSpacing(16)
 
         # Regras: cada item tem uma caixa para ativar/desativar sem apagar
         rules_box = QGroupBox("Regras de agendamento")
         rules_layout = QHBoxLayout(rules_box)
         self.rules_list = QListWidget()
-        self.rules_list.setStyleSheet("QListWidget { background: transparent; }")
         self.rules_list.itemDoubleClicked.connect(lambda _item: self._edit_rule())
         self.rules_list.itemChanged.connect(lambda _item: self._update_schedule_preview())
         rules_buttons = QVBoxLayout()
-        for label, slot in (("Adicionar", self._add_rule), ("Editar", self._edit_rule),
-                            ("Remover", self._remove_rule)):
-            button = QPushButton(label)
-            button.clicked.connect(slot)
-            rules_buttons.addWidget(button)
+        for label, icon_name, slot in (("Adicionar", "add", self._add_rule), ("Editar", "edit", self._edit_rule),
+                                       ("Remover", "remove", self._remove_rule)):
+            rules_buttons.addWidget(make_button(label, icon_name, slot))
         rules_buttons.addStretch()
-        rules_buttons.addWidget(icon_label("clock.png", 32))
         rules_layout.addWidget(self.rules_list)
         rules_layout.addLayout(rules_buttons)
         layout.addWidget(rules_box)
         self._rules = []
 
-        self.schedule_preview_label = QLabel()
-        self.schedule_preview_label.setWordWrap(True)
+        self.schedule_preview_label = muted_label()
         layout.addWidget(self.schedule_preview_label)
 
         # Retenção
@@ -733,22 +761,24 @@ class MainWindow(QMainWindow):
         layout.addLayout(engines)
 
         # Status
+        status_box = QGroupBox("Status")
+        status = QGridLayout(status_box)
+        status.setColumnStretch(1, 1)
         self.next_run_label = QLabel()
         self.last_run_label = QLabel()
         self.last_run_label.setWordWrap(True)
-        layout.addWidget(self.next_run_label)
-        layout.addWidget(self.last_run_label)
+        status.addWidget(icon_label("clock"), 0, 0)
+        status.addWidget(self.next_run_label, 0, 1)
+        status.addWidget(icon_label("logs"), 1, 0, Qt.AlignTop)
+        status.addWidget(self.last_run_label, 1, 1)
+        layout.addWidget(status_box)
         layout.addStretch(1)
 
-        buttons = QHBoxLayout()
-        self.save_button_schedule = QPushButton("Salvar Configurações")
-        self.save_button_schedule.clicked.connect(lambda: self.save_schedule(show_message=True))
-        self.run_now_button = QPushButton("Executar backup agora")
+        self.save_button_schedule = make_button("Salvar configurações", "save",
+                                                lambda: self.save_schedule(show_message=True), primary=True)
+        self.run_now_button = make_button("Executar agora", "run", self.run_backup_now)
         self.run_now_button.setToolTip("Salva a agenda atual e executa o backup em segundo plano.")
-        self.run_now_button.clicked.connect(self.run_backup_now)
-        buttons.addWidget(self.save_button_schedule)
-        buttons.addWidget(self.run_now_button)
-        layout.addLayout(buttons)
+        layout.addLayout(self._footer(self.run_now_button, self.save_button_schedule))
         return tab
 
     def _render_rules(self, select: int = -1) -> None:
@@ -854,13 +884,15 @@ class MainWindow(QMainWindow):
             status = "OK" if report.success else "COM FALHAS"
             self.last_run_label.setText(f"Último backup ({when}) - {status}: {report.summary()}")
         else:
-            self.last_run_label.setText("")
+            self.last_run_label.setText("Último backup: nenhum nesta sessão")
         self.run_now_button.setEnabled(not self.scheduler.is_running)
 
     # ================================================================== Aba Sistema
     def _build_system_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        layout.setContentsMargins(16, 12, 16, 16)
+        layout.setSpacing(16)
 
         startup_box = QGroupBox("Inicialização")
         startup_layout = QVBoxLayout(startup_box)
@@ -871,28 +903,25 @@ class MainWindow(QMainWindow):
         layout.addWidget(startup_box)
 
         folder_box = QGroupBox("Pasta de backups")
-        grid = QGridLayout(folder_box)
-        self.backup_dir = self._add_path_field(grid, 0, "config.png", f"Padrão: {BASE_DIR}", self._browse_backup_dir)
-        self.save_system_button = QPushButton("Salvar pasta")
-        self.save_system_button.clicked.connect(self.save_system)
-        grid.addWidget(self.save_system_button, 1, 0, 1, 3)
+        folder = QVBoxLayout(folder_box)
+        self.backup_dir = self._add_path_field(folder, "folder", f"Padrão: {BASE_DIR}", self._browse_backup_dir)
+        self.save_system_button = make_button("Salvar pasta", "save", self.save_system, primary=True)
+        folder.addLayout(self._footer(self.save_system_button))
         layout.addWidget(folder_box)
 
         tools_box = QGroupBox("Ferramentas")
         tools = QHBoxLayout(tools_box)
-        open_backups = QPushButton("Abrir pasta de backups")
-        open_backups.clicked.connect(lambda: self._open(load_settings().backup_root))
-        open_logs = QPushButton("Abrir pasta de logs")
-        open_logs.clicked.connect(lambda: self._open(LOGS_DIR))
-        register = QPushButton("Registrar novo usuário")
-        register.clicked.connect(lambda: RegistrationScreen(self).exec_())
-        for button in (open_backups, open_logs, register):
-            tools.addWidget(button)
+        for label, icon_name, slot in (
+            ("Pasta de backups", "browse", lambda: self._open(load_settings().backup_root)),
+            ("Pasta de logs", "logs", lambda: self._open(LOGS_DIR)),
+            ("Novo usuário", "register", lambda: RegistrationScreen(self).exec_()),
+        ):
+            tools.addWidget(make_button(label, icon_name, slot))
+        tools.addStretch(1)
         layout.addWidget(tools_box)
 
         layout.addStretch(1)
-        info = QLabel(f"BackupProject {__version__}  •  {BASE_DIR}")
-        info.setStyleSheet("color: gray;")
+        info = muted_label(f"DBKeeper {__version__}  •  {BASE_DIR}")
         layout.addWidget(info)
         return tab
 

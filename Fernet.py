@@ -1,6 +1,6 @@
 """Mantido por compatibilidade. Prefira executar `python generate_key.py`.
 
-Observação: o BackupProject gera a chave automaticamente na primeira execução.
+Observação: o DBKeeper gera a chave automaticamente na primeira execução.
 """
 
 import sys

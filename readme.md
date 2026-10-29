@@ -1,4 +1,6 @@
-# BackupProject
+# DBKeeper
+
+> Formerly **BackupProject** / Anteriormente chamado **BackupProject**.
 
 A backup program for scheduling daily backups on **SQL Server** and **MySQL**, running in the background in the Windows system tray.  
 Um programa de backup para agendar backups diários no **SQL Server** e **MySQL**, rodando em segundo plano na bandeja do Windows.
@@ -60,23 +62,23 @@ pip install -r requirements.txt
 
 1. Start the application / Inicie o programa:
    ```powershell
-   python BackupProject.py
+   python DBKeeper.py
    ```
 2. On **first run** (when no users exist yet), click **"Criar primeiro usuário"** on the login screen to register your username and password.  
    No **primeiro acesso** (enquanto não houver usuários cadastrados), clique em **"Criar primeiro usuário"** na tela de login para registrar seu usuário e senha.
 3. Log in to open the main window / Faça login para abrir a janela principal:
-   - **Conexões** (`config.png`): configure and test MySQL and/or SQL Server connections and click **Salvar Configurações**.
-   - **Agendamento** (`schedule.png`): add scheduling rules (**Adicionar / Editar / Remover**; the checkbox enables/disables a rule), set how many days to keep backups, select `Backup SQL Server` and/or `Backup MySQL`, and click **Salvar Configurações** (or **Executar backup agora**).
-   - **Sistema** (`monitor.png`): toggle **"Iniciar com o Windows"**, choose the backup destination folder, open backup/log folders, or register additional users.
-4. Closing the window hides the app in the **system tray** (double-click the tray icon to reopen; right-click for **Abrir**, **Backup**, or **Sair**).
+   - **Conexões** (database icon): configure and test MySQL and/or SQL Server connections and click **Salvar configurações**.
+   - **Agendamento** (calendar icon): add scheduling rules (**Adicionar / Editar / Remover**; the checkbox enables/disables a rule), set how many days to keep backups, select `Backup SQL Server` and/or `Backup MySQL`, and click **Salvar configurações** (or **Executar agora**).
+   - **Sistema** (gear icon): toggle **"Iniciar com o Windows"**, choose the backup destination folder, open backup/log folders, or register additional users.
+4. Closing the window hides the app in the **system tray** (double-click the tray icon to reopen; right-click for **Abrir**, **Executar backup**, or **Sair**).
 
 ### Command-Line Options / Parâmetros de linha de comando
 
 | Command / Comando | Description / Descrição |
 | --- | --- |
-| `pythonw BackupProject.py` | Opens the app and shows the login screen / Abre o programa exibindo a tela de login |
-| `pythonw BackupProject.py --startup` | Starts hidden in the system tray (used by Windows startup) / Inicia oculto na bandeja do sistema |
-| `python BackupProject.py --backup` | Runs the configured backup immediately without GUI and exits (`0` = success) / Executa o backup sem GUI e encerra |
+| `pythonw DBKeeper.py` | Opens the app and shows the login screen / Abre o programa exibindo a tela de login |
+| `pythonw DBKeeper.py --startup` | Starts hidden in the system tray (used by Windows startup) / Inicia oculto na bandeja do sistema |
+| `python DBKeeper.py --backup` | Runs the configured backup immediately without GUI and exits (`0` = success) / Executa o backup sem GUI e encerra |
 | `python generate_key.py` | Manually generates `content/fernet.key` (`--plain` to skip DPAPI, `--force` to overwrite) |
 
 ---
@@ -84,8 +86,9 @@ pip install -r requirements.txt
 ## Project Structure / Estrutura do projeto
 
 ```text
-BackupProject/
-├── BackupProject.py        # Entry point (GUI, --startup, and --backup)
+DBKeeper/
+├── DBKeeper.py             # Entry point (GUI, --startup, and --backup)
+├── BackupProject.py        # Backwards-compatible wrapper (old name) for DBKeeper.py
 ├── generate_key.py         # Optional CLI utility to regenerate the Fernet key
 ├── Fernet.py               # Backwards-compatible wrapper for generate_key.py
 ├── requirements.txt        # Python dependencies
@@ -99,8 +102,9 @@ BackupProject/
 │   ├── backup.py           # MySQL and SQL Server backup engine (Qt-free)
 │   ├── scheduler.py        # Rule-based weekly scheduler + single-worker QThreadPool
 │   ├── startup.py          # Windows Run registry integration (HKCU\...\Run)
+│   ├── icons.py            # Phosphor icons (QtAwesome) and the dark theme / stylesheet
 │   ├── ui.py               # Login, Registration, and Main Window screens
-│   └── app.py              # System tray controller, single-instance IPC, and dark theme
+│   └── app.py              # System tray controller and single-instance IPC
 ├── config/
 │   ├── settings.ini
 │   └── dbcredentials.ini
@@ -116,11 +120,12 @@ BackupProject/
 
 ```powershell
 pip install pyinstaller
-pyinstaller --noconsole --onedir --name BackupProject --icon images/system.ico --add-data "images;images" BackupProject.py
+pyinstaller --noconsole --onedir --name DBKeeper --icon images/app_icon.ico --add-data "images;images" DBKeeper.py
 ```
 
 ---
 
 ## Credits / Créditos
 
-- [Icons by Muhammad Ali (Flaticon)](https://www.flaticon.com/authors/muhammad-ali/gradient?author_id=570&type=standard)
+- Interface icons: [Phosphor Icons](https://phosphoricons.com/) (MIT) via [QtAwesome](https://github.com/spyder-ide/qtawesome)
+- [App icon by Muhammad Ali (Flaticon)](https://www.flaticon.com/authors/muhammad-ali/gradient?author_id=570&type=standard)
