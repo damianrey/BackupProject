@@ -56,6 +56,27 @@ pip install -r requirements.txt
 > **SQL Server:** install Microsoft **ODBC Driver 17 or 18 for SQL Server**.  
 > **MySQL:** requires `mysqldump.exe` installed (MySQL Server / MySQL Workbench / MariaDB).
 
+### Windows 7
+
+Windows 7 requires **Python 3.8** (the last version that supports it) and pinned dependencies.  
+O Windows 7 exige o **Python 3.8** (a última versão compatível) e dependências com versões fixas.
+
+1. **Prerequisites / Pré-requisitos:** Windows 7 **SP1** + updates **KB2533623** and **KB2999226** (Universal C Runtime).
+2. Install / Instale o **[Python 3.8.10](https://www.python.org/downloads/release/python-3810/)** (last 3.8 release with a Windows installer / última 3.8 com instalador).
+3. In `cmd` / No `cmd`:
+   ```bat
+   py -3.8 -m venv .venv
+   .venv\Scripts\activate.bat
+   pip install -r requirements-win7.txt
+   ```
+4. **SQL Server:** ODBC Driver 18 does not run on Windows 7 — use **ODBC Driver 17**, **SQL Server Native Client 11**, or the built-in `SQL Server` driver (the app negotiates them automatically).  
+   O ODBC Driver 18 não roda no Windows 7 — use o **ODBC Driver 17**, o **SQL Server Native Client 11** ou o driver `SQL Server` nativo (o programa escolhe automaticamente).
+
+`requirements-win7.txt` keeps `cryptography` below 43 (newer builds use a Rust toolchain without Windows 7 support) and leaves out `mysql-connector-python` (PyMySQL is used instead).  
+To build an `.exe` for Windows 7, run PyInstaller **with Python 3.8** (see *Packaging*) and test it on a Windows 7 machine/VM.
+
+> ⚠️ Python 3.8 and Windows 7 no longer receive security updates. / O Python 3.8 e o Windows 7 não recebem mais atualizações de segurança.
+
 ---
 
 ## Usage / Como usar
@@ -92,6 +113,7 @@ DBKeeper/
 ├── generate_key.py         # Optional CLI utility to regenerate the Fernet key
 ├── Fernet.py               # Backwards-compatible wrapper for generate_key.py
 ├── requirements.txt        # Python dependencies
+├── requirements-win7.txt   # Pinned dependencies for Windows 7 (Python 3.8)
 ├── backup_app/
 │   ├── paths.py            # Absolute paths and atomic file writes
 │   ├── log_config.py       # Rotating loggers (main.log, error.log, exception.log)

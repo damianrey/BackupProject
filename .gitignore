@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 .venv/
+.venv38/
 venv/
 env/
 
@@ -11,6 +12,7 @@ env/
 build/
 dist/
 *.spec
+build-commands.txt
 
 # Segredos, locks e logs em tempo de execução
 content/fernet.key

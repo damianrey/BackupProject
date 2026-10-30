@@ -1,0 +1,19 @@
+# Dependências para Windows 7 SP1 (Python 3.8, a última versão com suporte ao Windows 7).
+# Instale com:  pip install -r requirements-win7.txt
+# Veja a seção "Windows 7" do readme para os pré-requisitos do sistema.
+
+# Qt 5.15 é a última série com suporte oficial ao Windows 7
+PyQt5>=5.15,<5.16
+PyQt5-Qt5==5.15.2
+QtAwesome>=1.3,<1.5
+schedule>=1.2.0,<1.3
+
+# A partir da 43 o cryptography é compilado com um Rust que não suporta mais o Windows 7
+cryptography>=41,<43
+
+pyodbc>=5.0,<5.3
+PyMySQL>=1.1,<1.2
+
+# mysql-connector-python fica de fora de propósito: ele é só uma alternativa ao PyMySQL
+# no teste de conexão (o backup usa o mysqldump) e é mais uma extensão compilada para
+# dar problema no Windows 7. Se precisar dele, use: mysql-connector-python>=8.0,<8.1
