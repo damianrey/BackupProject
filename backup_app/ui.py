@@ -406,7 +406,7 @@ class RuleDialog(QDialog):
         rule = self.rule()
         problem = rule.validate()
         if problem:
-            self.preview.setText(problem)
+            self._set_preview(problem)
             return
         per_day = len(rule.times_of_day())
         text = f"{per_day} backup(s) por dia: {', '.join(rule.times_of_day())}"
@@ -414,7 +414,19 @@ class RuleDialog(QDialog):
         runs = upcoming_runs([rule], 3)
         if runs:
             text += f"\nPróximos: {format_runs(runs)}"
+        self._set_preview(text)
+
+    def _set_preview(self, text: str) -> None:
         self.preview.setText(text)
+        QTimer.singleShot(0, self._fit_height)  # espera o layout aplicar a mudança
+
+    def _fit_height(self) -> None:
+        """Ajusta a altura ao conteúdo visível, senão a sobra vira espaço entre os blocos."""
+        layout = self.layout()
+        layout.activate()
+        height = (layout.totalHeightForWidth(self.width()) if layout.hasHeightForWidth()
+                  else layout.totalSizeHint().height())
+        self.resize(self.width(), height)
 
     def accept(self) -> None:
         problem = self.rule().validate()
