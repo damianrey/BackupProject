@@ -188,6 +188,8 @@ class AppSettings:
     backup_dir: str = ""            # vazio = pasta do programa
     mysqldump_path: str = ""        # vazio = detecção automática
     sqlserver_backup_dir: str = ""  # vazio = <backup_dir>\sql (pasta vista pelo SQL Server)
+    notify_start: bool = False      # falhas são sempre avisadas
+    notify_success: bool = False
 
     @property
     def backup_root(self) -> Path:
@@ -276,6 +278,8 @@ def load_settings() -> AppSettings:
     settings.backup_dir = config.get("Paths", "backup_dir", fallback="")
     settings.mysqldump_path = config.get("Paths", "mysqldump_path", fallback="")
     settings.sqlserver_backup_dir = config.get("Paths", "sqlserver_backup_dir", fallback="")
+    settings.notify_start = _get_bool(config, "Notifications", "start")
+    settings.notify_success = _get_bool(config, "Notifications", "success")
     return settings
 
 
@@ -297,6 +301,10 @@ def save_settings(settings: AppSettings) -> None:
         "backup_dir": settings.backup_dir,
         "mysqldump_path": settings.mysqldump_path,
         "sqlserver_backup_dir": settings.sqlserver_backup_dir,
+    }
+    config["Notifications"] = {
+        "start": str(settings.notify_start),
+        "success": str(settings.notify_success),
     }
     _write_config(config, SETTINGS_FILE)
 

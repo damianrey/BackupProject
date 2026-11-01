@@ -19,7 +19,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path, PureWindowsPath
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from .locks import InterProcessLock
 from . import history
@@ -47,6 +47,9 @@ MYSQLDUMP_TIMEOUT = 4 * 60 * 60      # 4h: um dump travado não pode bloquear os
 
 # Evita que uma janela de console pisque a cada mysqldump em um app sem console
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+# Avisado ao começar cada banco: (nome para exibir, bancos já concluídos, total de bancos)
+ProgressCallback = Callable[[str, int, int], None]
 
 
 class BackupAlreadyRunning(RuntimeError):
@@ -384,7 +387,8 @@ def apply_retention(folder: Path, database: str, extension: str, keep_days: int,
     return removed
 
 
-def backup_mysql(settings: AppSettings, creds: MySQLCredentials, stamp: str) -> List[BackupResult]:
+def backup_mysql(settings: AppSettings, creds: MySQLCredentials, stamp: str,
+                 on_progress: Optional[ProgressCallback] = None) -> List[BackupResult]:
     if not creds.configured:
         return [BackupResult("MySQL", "-", False, "MySQL: credenciais não configuradas.")]
 
@@ -409,9 +413,10 @@ def backup_mysql(settings: AppSettings, creds: MySQLCredentials, stamp: str) -> 
     folder.mkdir(parents=True, exist_ok=True)
 
     results = []
-    for database in databases:
-        if database.lower() in MYSQL_EXCLUDED_DATABASES:
-            continue
+    targets = [database for database in databases if database.lower() not in MYSQL_EXCLUDED_DATABASES]
+    for index, database in enumerate(targets):
+        if on_progress is not None:
+            on_progress(f"MySQL: {database}", index, len(targets))
         destination = folder / backup_file_name(database, stamp, ".sql")
         result = _dump_mysql(mysqldump, creds, database, destination, server_version)
         results.append(result)
@@ -654,7 +659,7 @@ def backup_sqlserver(settings: AppSettings, creds: SQLServerCredentials, stamp: 
 # ---------------------------------------------------------------------------
 # Ponto de entrada
 # ---------------------------------------------------------------------------
-def run_backup(origin: str = "manual") -> BackupReport:
+def run_backup(origin: str = "manual", on_progress: Optional[ProgressCallback] = None) -> BackupReport:
     """Executa o backup de acordo com o settings.ini salvo.
 
     Lança BackupAlreadyRunning se outro backup (deste ou de outro processo)
@@ -675,9 +680,18 @@ def run_backup(origin: str = "manual") -> BackupReport:
             box = SecretBox(load_key(create=False))
             creds = load_credentials(box)
             stamp = report.started.strftime(STAMP_FORMAT)
+            sql_steps = 1 if settings.use_sql_server else 0
+
+            def mysql_progress(label: str, done: int, total: int) -> None:
+                if on_progress is not None:
+                    on_progress(label, done, total + sql_steps)
+
             if settings.use_mysql:
-                report.results += backup_mysql(settings, creds.mysql, stamp)
+                report.results += backup_mysql(settings, creds.mysql, stamp, mysql_progress)
             if settings.use_sql_server:
+                if on_progress is not None:
+                    done = len(report.results)
+                    on_progress(f"SQL Server: {creds.sqlserver.database}", done, done + 1)
                 report.results += backup_sqlserver(settings, creds.sqlserver, stamp)
     except Exception as exc:
         report.error = f"Erro inesperado no backup: {exc}"

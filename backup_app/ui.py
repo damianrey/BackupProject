@@ -1,6 +1,7 @@
 """Telas da aplicação: login, registro de usuário e janela principal."""
 
 import os
+from dataclasses import asdict
 from pathlib import Path
 
 from PyQt5.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTime, QTimer, pyqtSignal
@@ -8,9 +9,14 @@ from PyQt5.QtGui import QColor, QFont, QIcon, QPainter
 from PyQt5.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
     QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QPushButton, QRadioButton, QSizePolicy, QSpinBox, QStackedWidget, QTimeEdit,
-    QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QMainWindow, QMessageBox, QProgressBar, QPushButton, QRadioButton, QSizePolicy, QSpinBox, QStackedWidget,
+    QTimeEdit, QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
+
+try:
+    from PyQt5.QtWinExtras import QWinTaskbarButton
+except ImportError:  # pragma: no cover - módulo exclusivo do Windows
+    QWinTaskbarButton = None
 
 from . import __version__, history, startup, users
 from .backup import connect_mysql, connect_sqlserver, find_mysqldump
@@ -45,11 +51,19 @@ def muted_label(text: str = "") -> QLabel:
     return label
 
 
+def mark_invalid(edit: QLineEdit, invalid: bool = True) -> None:
+    """Destaca o campo com erro; o destaque sai quando o texto muda."""
+    edit.setProperty("invalid", invalid)
+    edit.style().unpolish(edit)
+    edit.style().polish(edit)
+
+
 def make_field(icon_name: str, placeholder: str, password: bool = False) -> QLineEdit:
     """Campo de texto com o ícone dentro, à esquerda (e botão de mostrar senha)."""
     edit = QLineEdit()
     edit.setPlaceholderText(placeholder)
     edit.setToolTip(placeholder)
+    edit.textChanged.connect(lambda _text: edit.property("invalid") and mark_invalid(edit, False))
     edit.addAction(icon(icon_name), QLineEdit.LeadingPosition)
     if password:
         edit.setEchoMode(QLineEdit.Password)
@@ -109,11 +123,11 @@ class StatusLine(QWidget):
         self._timer.timeout.connect(self.hide)
         self.hide()
 
-    def show_message(self, level: str, text: str) -> None:
+    def show_message(self, level: str, text: str, details: str = "") -> None:
         icon_name, color = HEALTH_STYLES[level]
         self._icon.setPixmap(icon(icon_name, color, color).pixmap(16, 16))
         self._text.setText(text)
-        self._text.setToolTip(text)
+        self._text.setToolTip(details or text)
         self.show()
         self._timer.stop()
         if self._auto_hide and level == history.LEVEL_OK:  # avisos ficam até serem lidos
@@ -121,6 +135,9 @@ class StatusLine(QWidget):
 
     def text(self) -> str:
         return self._text.text()
+
+    def details(self) -> str:
+        return self._text.toolTip()
 
 
 class PlaceholderList(QListWidget):
@@ -137,6 +154,27 @@ class PlaceholderList(QListWidget):
             painter.setPen(QColor(MUTED))
             painter.drawText(self.viewport().rect().adjusted(12, 0, -12, 0),
                              Qt.AlignCenter | Qt.TextWordWrap, self._placeholder)
+
+
+# Trecho do erro do banco (em minúsculas) -> o que fazer. Códigos valem em qualquer idioma do servidor.
+CONNECTION_HINTS = (
+    (("1045", "18456", "28000", "access denied", "login failed"), "Confira o usuário e a senha."),
+    (("1130",), "O servidor não permite este usuário a partir deste computador."),
+    (("1049", "4060"), "Confira o nome do banco de dados."),
+    (("2003", "10061", "can't connect"), "Confira o host, a porta e se o serviço do banco está em execução."),
+    (("08001", "hyt00", "timed out", "timeout"),
+     "Confira o nome do servidor e da instância, se o serviço está em execução e o firewall."),
+)
+
+
+def connection_error_text(engine: str, error: Exception) -> str:
+    """Mensagem do teste de conexão: o que fazer, quando o erro é conhecido."""
+    raw = str(error)
+    lowered = raw.lower()
+    for fragments, hint in CONNECTION_HINTS:
+        if any(fragment in lowered for fragment in fragments):
+            return f"Não foi possível conectar ao {engine}. {hint}"
+    return f"Erro ao conectar ao {engine}: {raw}"
 
 
 def probe_mysql(creds: MySQLCredentials) -> str:
@@ -324,7 +362,7 @@ class RegistrationScreen(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Novo usuário")
-        self.setFixedSize(360, 200)
+        self.setFixedSize(360, 230)
         self.setWindowIcon(QIcon(image("app_icon.ico")))
 
         self.new_username_entry = make_field("user", "Novo usuário")
@@ -335,6 +373,7 @@ class RegistrationScreen(QDialog):
 
         self.register_button = make_button("Registrar", "register", self.register_user, primary=True)
         self.register_button.setAutoDefault(False)  # o Enter já é tratado pelo returnPressed
+        self.status = StatusLine()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -342,7 +381,9 @@ class RegistrationScreen(QDialog):
         layout.addWidget(self.new_username_entry)
         layout.addWidget(self.new_password_entry)
         layout.addWidget(self.confirm_password_entry)
+        layout.addWidget(self.status)
         layout.addWidget(self.register_button)
+        layout.addStretch(1)
 
     def register_user(self) -> None:
         try:
@@ -352,7 +393,7 @@ class RegistrationScreen(QDialog):
                 self.confirm_password_entry.text(),
             )
         except users.UserError as exc:
-            QMessageBox.warning(self, "Registro", str(exc))
+            self.status.show_message(history.LEVEL_ERROR, str(exc))
             return
         except Exception as exc:
             error_log.error(f"Erro ao registrar usuário: {exc}")
@@ -464,6 +505,7 @@ class RuleDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self.ok_button = buttons.button(QDialogButtonBox.Ok)
 
         self._enabled = rule.enabled
         self.times_radio.toggled.connect(self._on_mode_changed)
@@ -506,6 +548,8 @@ class RuleDialog(QDialog):
     def _update_preview(self) -> None:
         rule = self.rule()
         problem = rule.validate()
+        self.ok_button.setEnabled(problem is None)  # o motivo aparece logo acima do botão
+        self.preview.setStyleSheet(f"color: {WARNING};" if problem else "")
         if problem:
             self._set_preview(problem)
             return
@@ -529,13 +573,6 @@ class RuleDialog(QDialog):
                   else layout.totalSizeHint().height())
         self.resize(self.width(), height)
 
-    def accept(self) -> None:
-        problem = self.rule().validate()
-        if problem:
-            QMessageBox.warning(self, "Regra de agendamento", problem)
-            return
-        super().accept()
-
 
 # ---------------------------------------------------------------------------
 # Janela principal
@@ -553,6 +590,8 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(QIcon(image("app_icon.ico")))
         self.setMinimumSize(780, 560)
         self._connection_tests = []  # mantém as tarefas vivas até o fim
+        self._taskbar = None
+        self._saved_states = {}  # como cada aba está gravada em disco
 
         self.home_tab = self._build_home_tab()
         self.settings_tab = self._build_connections_tab()
@@ -597,16 +636,24 @@ class MainWindow(QMainWindow):
         # Atualização do status de agendamento
         self.scheduler.schedule_changed.connect(self.refresh_status)
         self.scheduler.backup_started.connect(lambda _origin: self.refresh_status())
+        self.scheduler.backup_progress.connect(self.refresh_status)
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(30_000)
         self._status_timer.timeout.connect(self.refresh_status)
 
     # ------------------------------------------------------------------ eventos
     def showEvent(self, event) -> None:
-        # Sempre exibe o que está salvo em disco
-        self.load_connections()
-        self.load_schedule()
-        self.load_system()
+        # Sempre exibe o que está salvo em disco, exceto ao sair do minimizado:
+        # nesse caso a janela não fechou e o que foi digitado continua valendo
+        if not event.spontaneous():
+            self.load_connections()
+            self.load_schedule()
+            self.load_system()
+            for name, _widget, state, _save in self._sections():
+                self._saved_states[name] = state()
+        if QWinTaskbarButton is not None and self._taskbar is None:
+            self._taskbar = QWinTaskbarButton(self)
+            self._taskbar.setWindow(self.windowHandle())
         self.refresh_status()
         self._status_timer.start()
         super().showEvent(event)
@@ -614,8 +661,62 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         # Fechar apenas esconde: o programa continua na bandeja executando os backups
         event.ignore()
-        self._status_timer.stop()
-        self.hide()
+        if self.confirm_unsaved():
+            self._status_timer.stop()
+            self.hide()
+
+    # ------------------------------------------------------------------ alterações não salvas
+    def _sections(self):
+        """Abas com botão de salvar: nome, página, estado atual e como salvar."""
+        return (
+            ("Conexões", self.settings_tab, self._connections_state, self.save_credentials),
+            ("Agendamento", self.schedule_tab, self._schedule_state, self.save_schedule),
+            ("Pasta de backups", self.system_tab, self.backup_dir.text, self.save_system),
+        )
+
+    def _connections_state(self) -> tuple:
+        return tuple(field.text() for field in (
+            self.mysql_host, self.mysql_username, self.mysql_password, self.mysql_port, self.mysqldump_path,
+            self.sql_server, self.sql_username, self.sql_password, self.sql_database, self.sql_port,
+            self.sqlserver_backup_dir,
+        ))
+
+    def _schedule_state(self) -> tuple:
+        self._sync_rule_states()
+        return ([asdict(rule) for rule in self._rules], self.retention_spin.value(),
+                self.checkbox_mysql.isChecked(), self.checkbox_sql_server.isChecked())
+
+    def _mark_saved(self, name: str) -> None:
+        for section, _widget, state, _save in self._sections():
+            if section == name:
+                self._saved_states[name] = state()
+
+    def _ask_unsaved(self, names) -> str:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Alterações não salvas")
+        box.setText(f"Há alterações não salvas em: {', '.join(names)}.")
+        save = box.addButton("Salvar", QMessageBox.AcceptRole)
+        discard = box.addButton("Descartar", QMessageBox.DestructiveRole)
+        box.addButton("Continuar editando", QMessageBox.RejectRole)
+        box.setDefaultButton(save)
+        box.exec_()
+        return {save: "save", discard: "discard"}.get(box.clickedButton(), "cancel")
+
+    def confirm_unsaved(self) -> bool:
+        """Pergunta o que fazer com as alterações pendentes. False = a janela deve continuar aberta."""
+        pending = [section for section in self._sections() if self._saved_states.get(section[0]) != section[2]()]
+        if not pending:
+            return True
+        answer = self._ask_unsaved([section[0] for section in pending])
+        if answer == "cancel":
+            return False
+        if answer == "save":
+            for _name, widget, _state, save in pending:
+                if not save():  # mostra a aba para que o erro seja visto
+                    self.nav_buttons.button(self.pages.indexOf(widget)).click()
+                    return False
+        return True
 
     # ------------------------------------------------------------------ helpers de layout
     @staticmethod
@@ -633,6 +734,21 @@ class MainWindow(QMainWindow):
         row.addWidget(make_icon_button("browse", "Procurar...", on_browse))
         layout.addLayout(row)
         return edit
+
+    @staticmethod
+    def _field_error(status: StatusLine, field: QLineEdit, message: str) -> None:
+        mark_invalid(field)
+        field.setFocus()
+        status.show_message(history.LEVEL_ERROR, message)
+
+    def _ports_valid(self, status: StatusLine, *fields: QLineEdit) -> bool:
+        for field in fields:
+            try:
+                parse_port(field.text())
+            except ValueError:
+                self._field_error(status, field, "Porta inválida: use um número de 1 a 65535 ou deixe vazio.")
+                return False
+        return True
 
     @staticmethod
     def _footer(*buttons: QPushButton, status: "StatusLine | None" = None) -> QHBoxLayout:
@@ -669,6 +785,11 @@ class MainWindow(QMainWindow):
         texts.setSpacing(2)
         texts.addWidget(self.health_title)
         texts.addWidget(self.health_detail)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.hide()
+        texts.addSpacing(4)
+        texts.addWidget(self.progress_bar)
         self.run_now_button = make_button("Executar agora", "run", self.run_backup_now, primary=True)
         self.run_now_button.setToolTip("Executa o backup em segundo plano com a agenda salva.")
         card_layout.addWidget(self.health_icon)
@@ -857,25 +978,21 @@ class MainWindow(QMainWindow):
 
     # Função para testar a conexão com MySQL
     def test_mysql_connection(self) -> None:
-        try:
-            creds = self._mysql_from_fields()
-        except ValueError:
-            QMessageBox.warning(self, "Testar conexão MySQL", "Porta do MySQL inválida.")
+        if not self._ports_valid(self.mysql_status, self.mysql_port):
             return
+        creds = self._mysql_from_fields()
         if not creds.user:
-            QMessageBox.information(self, "Testar conexão MySQL", "Preencha ao menos o usuário do MySQL!")
+            self._field_error(self.mysql_status, self.mysql_username, "Informe o usuário do MySQL.")
             return
         self._start_connection_test(self.test_mysql_button, self.mysql_status, "MySQL", probe_mysql, creds)
 
     # Função para testar a conexão com SQL Server
     def test_sql_server_connection(self) -> None:
-        try:
-            creds = self._sqlserver_from_fields()
-        except ValueError:
-            QMessageBox.warning(self, "Testar conexão SQL Server", "Porta do SQL Server inválida.")
+        if not self._ports_valid(self.sql_status, self.sql_port):
             return
+        creds = self._sqlserver_from_fields()
         if not creds.server:
-            QMessageBox.information(self, "Testar conexão SQL Server", "Preencha ao menos o servidor!")
+            self._field_error(self.sql_status, self.sql_server, "Informe o servidor do SQL Server.")
             return
         self._start_connection_test(self.test_sql_server_button, self.sql_status, "SQL Server",
                                     probe_sqlserver, creds)
@@ -892,7 +1009,7 @@ class MainWindow(QMainWindow):
             button.setText(label)
             button.setEnabled(True)
             if error is not None:
-                status.show_message(history.LEVEL_ERROR, f"Erro ao conectar ao {engine}: {error}")
+                status.show_message(history.LEVEL_ERROR, connection_error_text(engine, error), str(error))
             else:
                 details = f" Versão do servidor: {version}" if version else ""
                 status.show_message(history.LEVEL_OK, f"Conexão bem-sucedida.{details}")
@@ -902,20 +1019,20 @@ class MainWindow(QMainWindow):
         QThreadPool.globalInstance().start(task)
 
     # Função para salvar as credenciais das conexões aos bancos de dados
-    def save_credentials(self) -> None:
-        try:
-            creds = DbCredentials(self._mysql_from_fields(), self._sqlserver_from_fields())
-        except ValueError:
-            QMessageBox.warning(self, "Salvar", "Verifique as portas informadas (1 a 65535).")
-            return
+    def save_credentials(self) -> bool:
+        status = self.connections_status
+        if not self._ports_valid(status, self.mysql_port, self.sql_port):
+            return False
+        creds = DbCredentials(self._mysql_from_fields(), self._sqlserver_from_fields())
         dump_path = self.mysqldump_path.text().strip()
         if dump_path and not Path(dump_path).is_file():
-            QMessageBox.warning(self, "Salvar", f"O arquivo '{dump_path}' não existe.")
-            return
+            self._field_error(status, self.mysqldump_path,
+                              "mysqldump.exe não encontrado: escolha o arquivo ou deixe vazio para detectar.")
+            return False
 
         box = get_secret_box(self)
         if box is None:
-            return
+            return False
         try:
             save_credentials(creds, box)
             settings = load_settings()
@@ -925,9 +1042,11 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             error_log.error(f"Erro ao salvar as configurações de conexão: {exc}")
             QMessageBox.critical(self, "Erro", f"Não foi possível salvar as configurações:\n{exc}")
-            return
+            return False
         main_log.info("Configurações de conexão salvas.")
-        self.connections_status.show_message(history.LEVEL_OK, "Configurações salvas.")
+        self._mark_saved("Conexões")
+        status.show_message(history.LEVEL_OK, "Configurações salvas.")
+        return True
 
     # ================================================================== Aba Agendamento
     def _build_schedule_tab(self) -> QWidget:
@@ -1066,6 +1185,7 @@ class MainWindow(QMainWindow):
             return False
 
         jobs = self.scheduler.reload(settings)
+        self._mark_saved("Agendamento")
         if show_message:
             if jobs and not (settings.use_mysql or settings.use_sql_server):
                 self.schedule_status.show_message(
@@ -1085,6 +1205,7 @@ class MainWindow(QMainWindow):
         running = self.scheduler.is_running
         next_run = self.scheduler.next_run()
         health = self.scheduler.health(entries)
+        self._show_progress(running)
 
         icon_name, color = HEALTH_STYLES[health.level]
         self.health_icon.setPixmap(icon(icon_name, color, color).pixmap(32, 32))
@@ -1103,9 +1224,22 @@ class MainWindow(QMainWindow):
             self.next_run_label.setText(f"{DAY_LABELS[day_of(next_run)]}, {next_run.strftime('%d/%m/%Y %H:%M')}")
             self.next_run_detail.setText(history.format_relative(next_run))
         else:
-            self.next_run_label.setText("Nenhum agendado")
+            self.next_run_label.setText("Agendamento pausado" if self.scheduler.paused else "Nenhum agendado")
             self.next_run_detail.setText("")
         self._render_history(entries)
+
+    def _show_progress(self, running: bool) -> None:
+        """Barra na tela e na barra de tarefas; com um banco só não há etapas a mostrar, então fica indeterminada."""
+        progress = self.scheduler.progress if running else None
+        maximum, value = (progress[2], progress[1]) if progress and progress[2] > 1 else (0, 0)
+        self.progress_bar.setRange(0, maximum)
+        self.progress_bar.setValue(value)
+        self.progress_bar.setVisible(running)
+        if self._taskbar is not None:
+            taskbar = self._taskbar.progress()
+            taskbar.setRange(0, maximum)
+            taskbar.setValue(value)
+            taskbar.setVisible(running)
 
     # ================================================================== Aba Sistema
     def _build_system_tab(self) -> QWidget:
@@ -1121,6 +1255,16 @@ class MainWindow(QMainWindow):
         self.autostart_checkbox.toggled.connect(self._on_autostart_toggled)
         startup_layout.addWidget(self.autostart_checkbox)
         layout.addWidget(startup_box)
+
+        notify_box = QGroupBox("Notificações")
+        notify_layout = QVBoxLayout(notify_box)
+        self.notify_start_checkbox = QCheckBox("Avisar quando um backup começar")
+        self.notify_success_checkbox = QCheckBox("Avisar quando um backup agendado terminar bem")
+        for checkbox in (self.notify_start_checkbox, self.notify_success_checkbox):
+            checkbox.toggled.connect(self._on_notifications_toggled)
+            notify_layout.addWidget(checkbox)
+        notify_layout.addWidget(muted_label("Falhas sempre são avisadas."))
+        layout.addWidget(notify_box)
 
         folder_box = QGroupBox("Pasta de backups")
         folder = QVBoxLayout(folder_box)
@@ -1161,7 +1305,13 @@ class MainWindow(QMainWindow):
         self.autostart_checkbox.blockSignals(True)
         self.autostart_checkbox.setChecked(startup.is_enabled())
         self.autostart_checkbox.blockSignals(False)
-        self.backup_dir.setText(load_settings().backup_dir)
+        settings = load_settings()
+        self.backup_dir.setText(settings.backup_dir)
+        for checkbox, checked in ((self.notify_start_checkbox, settings.notify_start),
+                                  (self.notify_success_checkbox, settings.notify_success)):
+            checkbox.blockSignals(True)
+            checkbox.setChecked(checked)
+            checkbox.blockSignals(False)
 
     def _on_autostart_toggled(self, enabled: bool) -> None:
         try:
@@ -1173,20 +1323,34 @@ class MainWindow(QMainWindow):
             return
         main_log.info("Inicialização com o Windows " + ("ativada." if enabled else "desativada."))
 
-    def save_system(self) -> None:
+    def _on_notifications_toggled(self) -> None:
+        settings = load_settings()
+        settings.notify_start = self.notify_start_checkbox.isChecked()
+        settings.notify_success = self.notify_success_checkbox.isChecked()
+        try:
+            save_settings(settings)
+        except OSError as exc:
+            error_log.error(f"Erro ao salvar settings.ini: {exc}")
+            QMessageBox.critical(self, "Erro", f"Não foi possível salvar as notificações:\n{exc}")
+            self.load_system()
+
+    def save_system(self) -> bool:
         path = self.backup_dir.text().strip()
         if path:
             try:
                 Path(path).mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                QMessageBox.warning(self, "Pasta de backups", f"Não foi possível usar '{path}':\n{exc}")
-                return
+                self._field_error(self.system_status, self.backup_dir,
+                                  f"Não foi possível usar esta pasta ({exc.strerror}). Escolha outra.")
+                return False
         settings = load_settings()
         settings.backup_dir = path
         try:
             save_settings(settings)
         except OSError as exc:
             QMessageBox.critical(self, "Erro", f"Não foi possível salvar:\n{exc}")
-            return
+            return False
         main_log.info(f"Pasta de backups alterada para '{settings.backup_root}'.")
+        self._mark_saved("Pasta de backups")
         self.system_status.show_message(history.LEVEL_OK, f"Os backups serão gravados em {settings.backup_root}")
+        return True

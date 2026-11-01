@@ -58,6 +58,7 @@ _ICONS = {
     "test": "ph.lightning",
     "save": "ph.floppy-disk",
     "run": "ph.play",
+    "pause": "ph.pause",
     "add": "ph.plus",
     "edit": "ph.pencil-simple",
     "remove": "ph.trash",
@@ -172,7 +173,10 @@ QWidget#sidebar QToolButton {{
 QWidget#sidebar QToolButton:hover {{ background: #2b2e33; }}
 QWidget#sidebar QToolButton:checked {{ background: {WINDOW}; border-left-color: {ACCENT}; }}
 QLabel[muted="true"] {{ color: {MUTED}; }}
+QLineEdit[invalid="true"] {{ border-color: {DANGER}; }}
 QFrame#statusCard {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 6px; }}
+QProgressBar {{ background: {BORDER}; border: none; border-radius: 2px; max-height: 4px; }}
+QProgressBar::chunk {{ background: {ACCENT}; border-radius: 2px; }}
 QTreeWidget {{
     background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 5px;
     selection-background-color: #2f4a6e;

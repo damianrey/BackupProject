@@ -4,7 +4,7 @@ import hashlib
 import sys
 
 from PyQt5.QtCore import QCoreApplication, QObject, Qt, QTimer
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QCursor, QIcon
 from PyQt5.QtNetwork import QLocalServer, QLocalSocket
 from PyQt5.QtWidgets import QAction, QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
@@ -72,6 +72,7 @@ class BackupApplication(QObject):
 
         self.scheduler.backup_started.connect(self._on_backup_started)
         self.scheduler.backup_finished.connect(self._on_backup_finished)
+        self.scheduler.backup_progress.connect(self._refresh_tray)
         self.scheduler.schedule_changed.connect(self._refresh_tray)
 
         self._server = QLocalServer(self)
@@ -124,20 +125,39 @@ class BackupApplication(QObject):
 
         self.tray = QSystemTrayIcon(QIcon(image("app_icon.ico")), self)
 
+        # Resumo no topo do menu: só informa, por isso fica desativado
+        self._status_action = QAction(self)
+        self._status_action.setEnabled(False)
+        self._next_action = QAction(self)
+        self._next_action.setEnabled(False)
         open_action = QAction(icon("open"), "Abrir", self)
         open_action.triggered.connect(self.show_login)
         backup_action = QAction(icon("run"), "Executar backup", self)
         backup_action.triggered.connect(self.backup_now)
+        pause_action = QAction(icon("pause"), "Pausar agendamento", self)
+        pause_action.setCheckable(True)
+        pause_action.toggled.connect(self.scheduler.set_paused)
         close_action = QAction(icon("quit"), "Sair", self)
         close_action.triggered.connect(self.request_quit)
 
         self._tray_menu = QMenu()
+        self._tray_menu.addAction(self._status_action)
+        self._tray_menu.addAction(self._next_action)
+        self._tray_menu.addSeparator()
         self._tray_menu.addAction(open_action)
         self._tray_menu.addAction(backup_action)
+        self._tray_menu.addAction(pause_action)
         self._tray_menu.addSeparator()
         self._tray_menu.addAction(close_action)
         self.tray.setContextMenu(self._tray_menu)
         self.tray.activated.connect(self._on_tray_activated)
+        self.tray.messageClicked.connect(self.show_login)
+
+        # O clique simples espera para não abrir o menu quando for um duplo clique
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.setInterval(QApplication.doubleClickInterval())
+        self._click_timer.timeout.connect(self._show_tray_menu)
         self.tray.show()
         self._refresh_tray()
 
@@ -147,8 +167,15 @@ class BackupApplication(QObject):
         refresh_timer.start()
 
     def _on_tray_activated(self, reason) -> None:
-        if reason == QSystemTrayIcon.DoubleClick:
+        if reason == QSystemTrayIcon.Trigger:
+            self._click_timer.start()
+        elif reason == QSystemTrayIcon.DoubleClick:
+            self._click_timer.stop()
             self.show_login()
+
+    def _show_tray_menu(self) -> None:
+        self._tray_menu.popup(QCursor.pos())
+        self._tray_menu.activateWindow()  # sem isso o menu não fecha ao clicar fora
 
     def _notify(self, title: str, message: str, icon=QSystemTrayIcon.Information) -> None:
         if self.tray is not None and self.tray.isVisible():
@@ -162,11 +189,16 @@ class BackupApplication(QObject):
         if health.level != self._tray_level:
             self._tray_level = health.level
             self.tray.setIcon(tray_icon(image("app_icon.ico"), health.level))
-        lines = [APP_NAME, health.title]
         next_run = self.scheduler.next_run()
-        if next_run and health.level != history.LEVEL_RUNNING:
-            lines.append(f"Próximo backup: {DAY_LABELS[day_of(next_run)]} {next_run.strftime('%H:%M')}")
-        self.tray.setToolTip("\n".join(lines))
+        if health.level == history.LEVEL_RUNNING:
+            detail = health.detail
+        elif next_run:
+            detail = f"Próximo backup: {DAY_LABELS[day_of(next_run)]} {next_run.strftime('%H:%M')}"
+        else:
+            detail = "Nenhum backup previsto"
+        self.tray.setToolTip("\n".join((APP_NAME, health.title, detail)))
+        self._status_action.setText(health.title)
+        self._next_action.setText(detail)
 
     # ------------------------------------------------------------------ ações
     def show_login(self) -> None:
@@ -190,20 +222,22 @@ class BackupApplication(QObject):
 
     def _on_backup_started(self, origin: str) -> None:
         self._refresh_tray()
-        if origin == "manual":
+        if load_settings().notify_start:
             self._notify(APP_NAME, "Backup iniciado em segundo plano.")
 
     def _on_backup_finished(self, report: BackupReport) -> None:
         self._refresh_tray()
-        if report.success:
-            self._notify("Backup concluído", report.summary())
-        else:
-            self._notify("Falha no backup", report.summary() + "\nDetalhes em logs\\error.log",
+        if not report.success:
+            self._notify("Falha no backup", report.summary() + "\nClique para ver os detalhes.",
                          QSystemTrayIcon.Warning)
+        elif report.origin == "manual" or load_settings().notify_success:  # quem pediu quer saber o resultado
+            self._notify("Backup concluído", report.summary())
         if self._quit_pending:
             self._quit()
 
     def request_quit(self) -> None:
+        if self.main_window.isVisible() and not self.main_window.confirm_unsaved():
+            return
         if self.scheduler.is_running:
             answer = QMessageBox.question(
                 None, APP_NAME,

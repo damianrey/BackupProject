@@ -13,7 +13,7 @@ Arquitetura (substitui o antigo ScheduleThread com `while True`):
   um job semanal por par (dia, horário).
 """
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import schedule
 from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
@@ -36,6 +36,7 @@ _WEEKDAY_JOBS = {
 
 class _WorkerSignals(QObject):
     finished = pyqtSignal(object)  # BackupReport
+    progress = pyqtSignal(str, int, int)  # banco atual, concluídos, total
 
 
 class _BackupTask(QRunnable):
@@ -46,7 +47,7 @@ class _BackupTask(QRunnable):
 
     def run(self) -> None:  # executa na thread do pool
         try:
-            report = run_backup(self.origin)
+            report = run_backup(self.origin, self.signals.progress.emit)
         except BackupAlreadyRunning as exc:
             report = BackupReport(origin=self.origin, error=str(exc))
         except Exception as exc:  # nunca deixa a exceção derrubar o worker
@@ -58,6 +59,7 @@ class _BackupTask(QRunnable):
 class BackupScheduler(QObject):
     backup_started = pyqtSignal(str)       # origem ("agendado" / "manual")
     backup_finished = pyqtSignal(object)   # BackupReport
+    backup_progress = pyqtSignal()
     schedule_changed = pyqtSignal()
 
     def __init__(self, parent: Optional[QObject] = None):
@@ -69,6 +71,8 @@ class BackupScheduler(QObject):
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(1)
         self._current_task: Optional[_BackupTask] = None
+        self._paused = False
+        self.progress: Optional[Tuple[str, int, int]] = None  # banco atual, concluídos, total
         self.last_report: Optional[BackupReport] = None
 
     # ------------------------------------------------------------------ ciclo de vida
@@ -102,15 +106,41 @@ class BackupScheduler(QObject):
         return descriptions
 
     def next_run(self):
-        return self._scheduler.next_run if self._scheduler.jobs else None
+        return self._scheduler.next_run if self._scheduler.jobs and not self._paused else None
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    def set_paused(self, paused: bool) -> None:
+        """Suspende só os backups automáticos; "Executar agora" continua funcionando.
+
+        Vale até retomar ou reiniciar o programa, para que uma pausa esquecida
+        não deixe os backups parados para sempre.
+        """
+        if paused == self._paused:
+            return
+        self._paused = paused
+        main_log.info("Agendamento " + ("pausado." if paused else "retomado."))
+        if paused:
+            self.schedule_changed.emit()
+        else:
+            self.reload(load_settings())  # recalcula: os horários perdidos na pausa não disparam todos de uma vez
 
     def health(self, entries: List[history.HistoryEntry]) -> history.Health:
         """Situação geral, a mesma na tela Início e na bandeja."""
         settings = load_settings()
-        return history.evaluate(entries, self.next_run() is not None,
-                                settings.use_mysql or settings.use_sql_server, self.is_running)
+        health = history.evaluate(entries, self.next_run() is not None,
+                                  settings.use_mysql or settings.use_sql_server, self.is_running,
+                                  paused=self._paused)
+        if self.is_running and self.progress is not None:
+            label, done, total = self.progress
+            health.detail = f"{label} ({done + 1} de {total})"
+        return health
 
     def _tick(self) -> None:
+        if self._paused:
+            return
         try:
             self._scheduler.run_pending()
         except Exception:
@@ -128,13 +158,20 @@ class BackupScheduler(QObject):
             return False
         task = _BackupTask(origin)
         task.signals.finished.connect(self._on_finished)
+        task.signals.progress.connect(self._on_progress)
         self._current_task = task  # mantém a referência viva até o fim
+        self.progress = None
         self.backup_started.emit(origin)
         self._pool.start(task)
         return True
 
+    def _on_progress(self, label: str, done: int, total: int) -> None:  # executa na thread da interface
+        self.progress = (label, done, total)
+        self.backup_progress.emit()
+
     def _on_finished(self, report: BackupReport) -> None:  # executa na thread da interface
         self._current_task = None
+        self.progress = None
         self.last_report = report
         self.backup_finished.emit(report)
         self.schedule_changed.emit()

@@ -160,7 +160,7 @@ def format_size(size: Optional[int]) -> str:
 
 
 def evaluate(entries: List[HistoryEntry], has_schedule: bool, has_engine: bool, running: bool,
-             now: Optional[datetime] = None) -> Health:
+             now: Optional[datetime] = None, paused: bool = False) -> Health:
     """Responde à pergunta principal da tela Início: os backups estão em dia?"""
     now = now or datetime.now()
     latest = entries[0] if entries else None
@@ -173,6 +173,9 @@ def evaluate(entries: List[HistoryEntry], has_schedule: bool, has_engine: bool, 
                       "Escolha MySQL ou SQL Server na aba Agendamento.")
     if latest is not None and not latest.success:
         return Health(LEVEL_ERROR, "O último backup falhou", latest.summary)
+    if paused:
+        return Health(LEVEL_WARNING, "Agendamento pausado",
+                      "Nenhum backup automático será feito. Retome pelo ícone da bandeja.")
     if last_success is None:
         if has_schedule:
             return Health(LEVEL_INFO, "Aguardando o primeiro backup", "Ele será feito no próximo horário agendado.")
