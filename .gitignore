@@ -18,6 +18,7 @@ build-commands.txt
 content/fernet.key
 content/*.lock
 content/*.tmp
+content/history.jsonl
 config/*.tmp
 logs/*.log
 logs/*.log.*

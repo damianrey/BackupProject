@@ -13,9 +13,10 @@ Um programa de backup para agendar backups diários no **SQL Server** e **MySQL*
 
 ## Features (EN)
 
-- **Background execution in the system tray** with start, completion, and failure notifications.
+- **Background execution in the system tray** with start, completion, and failure notifications; a badge on the tray icon shows when a backup is running or needs attention.
 - **Automatic Windows startup** (`HKCU\...\Run` via `pythonw.exe`, toggled directly from the **Sistema** tab).
 - **Rule-based scheduling with multiple backups per day**: each rule picks weekdays and either fixed times (e.g. `08:00, 12:00, 18:00`) or an interval (e.g. every 3h from 07:00 to 19:00); overlapping rules never duplicate a run. Runs without freezing the UI (`QTimer` scheduler + single-worker `QThreadPool`). Old `[Days]/[Time]` settings are migrated automatically.
+- **Home screen and backup history**: the **Início** tab shows at a glance whether backups are up to date; results, including `--backup` runs, are kept in `content/history.jsonl`.
 - **Timestamped backups + retention**: files are named `database_YYYY-MM-DD_HHMM.sql/.bak`; after each successful backup, files older than *N* days are deleted (the newest backup of each database is always kept).
 - **Headless CLI mode (`--backup`)** to run backups without opening the GUI — ideal for **Windows Task Scheduler** when backups must run even with no user logged in.
 - **MySQL & SQL Server support**:
@@ -29,9 +30,10 @@ Um programa de backup para agendar backups diários no **SQL Server** e **MySQL*
 
 ## Funcionalidades (PT-BR)
 
-- **Execução em segundo plano na bandeja do sistema** com notificações de início, conclusão e falha.
+- **Execução em segundo plano na bandeja do sistema** com notificações de início, conclusão e falha; um selo no ícone da bandeja mostra quando há backup em andamento ou algo que precisa de atenção.
 - **Inicialização automática com o Windows** (`HKCU\...\Run` usando `pythonw.exe`, configurável direto na aba **Sistema**).
 - **Agendamento por regras, com vários backups por dia**: cada regra define os dias da semana e horários fixos (ex.: `08:00, 12:00, 18:00`) ou um intervalo (ex.: a cada 3h das 07:00 às 19:00); regras sobrepostas não duplicam backups. Roda sem congelar a interface (agendador via `QTimer` + fila de execução em worker único). Configurações antigas (`[Days]/[Time]`) são migradas automaticamente.
+- **Tela inicial e histórico**: a aba **Início** mostra de imediato se os backups estão em dia; os resultados, inclusive do `--backup`, ficam em `content/history.jsonl`.
 - **Backups com data/hora + retenção**: arquivos no formato `banco_AAAA-MM-DD_HHMM.sql/.bak`; após cada backup bem-sucedido, os arquivos com mais de *N* dias são apagados (o backup mais recente de cada banco é sempre mantido).
 - **Modo linha de comando (`--backup`)** para rodar backups sem interface gráfica — ideal para o **Agendador de Tarefas do Windows** quando o backup precisa rodar mesmo sem usuário logado.
 - **Suporte a MySQL e SQL Server**:
@@ -88,8 +90,9 @@ To build an `.exe` for Windows 7, run PyInstaller **with Python 3.8** (see *Pack
 2. On **first run** (when no users exist yet), click **"Criar primeiro usuário"** on the login screen to register your username and password.  
    No **primeiro acesso** (enquanto não houver usuários cadastrados), clique em **"Criar primeiro usuário"** na tela de login para registrar seu usuário e senha.
 3. Log in to open the main window / Faça login para abrir a janela principal:
+   - **Início** (home icon): shows whether backups are up to date, the last and next backup, the history, and **Executar agora**.
    - **Conexões** (database icon): configure and test MySQL and/or SQL Server connections and click **Salvar configurações**.
-   - **Agendamento** (calendar icon): add scheduling rules (**Adicionar / Editar / Remover**; the checkbox enables/disables a rule), set how many days to keep backups, select `Backup SQL Server` and/or `Backup MySQL`, and click **Salvar configurações** (or **Executar agora**).
+   - **Agendamento** (calendar icon): add scheduling rules (**Adicionar / Editar / Remover**; the checkbox enables/disables a rule), set how many days to keep backups, select `Backup SQL Server` and/or `Backup MySQL`, and click **Salvar configurações**.
    - **Sistema** (gear icon): toggle **"Iniciar com o Windows"**, choose the backup destination folder, open backup/log folders, or register additional users.
 4. Closing the window hides the app in the **system tray** (double-click the tray icon to reopen; right-click for **Abrir**, **Executar backup**, or **Sair**).
 
@@ -122,6 +125,7 @@ DBKeeper/
 │   ├── users.py            # User authentication and registration
 │   ├── settings.py         # Read/write for settings.ini and dbcredentials.ini
 │   ├── backup.py           # MySQL and SQL Server backup engine (Qt-free)
+│   ├── history.py          # Backup history and the overall status shown on the home screen
 │   ├── scheduler.py        # Rule-based weekly scheduler + single-worker QThreadPool
 │   ├── startup.py          # Windows Run registry integration (HKCU\...\Run)
 │   ├── icons.py            # Phosphor icons (QtAwesome) and the dark theme / stylesheet

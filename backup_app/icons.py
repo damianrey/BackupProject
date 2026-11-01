@@ -9,7 +9,8 @@ para que a interface continue funcionando.
 import tempfile
 from pathlib import Path
 
-from PyQt5.QtGui import QColor, QIcon, QPalette
+from PyQt5.QtCore import QRectF, Qt
+from PyQt5.QtGui import QColor, QIcon, QPainter, QPalette, QPen, QPixmap
 from PyQt5.QtWidgets import QApplication, QStyleFactory
 
 try:
@@ -27,11 +28,16 @@ BORDER = "#3a3d43"
 TEXT = "#e3e6ea"
 MUTED = "#8b929c"
 ON_ACCENT = "#0e1a2b"  # texto/ícone sobre fundo na cor de destaque
+# Reservadas para a situação dos backups, sempre junto de ícone e texto
+SUCCESS = "#4cc38a"
+WARNING = "#e5b567"
+DANGER = "#f0716b"
 
 # Nome semântico -> ícone Phosphor. Use sempre um nome daqui, nunca o ícone direto,
 # para manter a combinação consistente entre as telas.
 _ICONS = {
     # Abas
+    "home": "ph.house",
     "connections": "ph.database",
     "schedule": "ph.calendar-check",
     "system": "ph.gear-six",
@@ -59,7 +65,22 @@ _ICONS = {
     "open": "ph.app-window",
     "quit": "ph.sign-out",
     "clock": "ph.clock",
+    # Situação
+    "ok": "ph.check-circle",
+    "info": "ph.info",
+    "running": "ph.arrows-clockwise",
+    "warning": "ph.warning",
+    "error": "ph.x-circle",
 }
+
+# Situação -> marca e cor do selo na bandeja; as demais usam o ícone sem selo.
+# Traço grosso porque o selo tem poucos pixels; "em andamento" é claro para destacar do ícone azul.
+_TRAY_BADGES = {
+    "running": ("ph.arrows-clockwise-bold", TEXT),
+    "warning": ("ph.warning-bold", WARNING),
+    "error": ("ph.x-bold", DANGER),
+}
+_TRAY_SIZES = (16, 20, 24, 32, 40, 48, 64)
 
 
 def icon(name: str, color: str = ICON, active: str = ACCENT) -> QIcon:
@@ -76,6 +97,33 @@ def tab_icon(name: str) -> QIcon:
         return QIcon()
     return qta.icon(_ICONS[name], color_off=MUTED, color_on=ACCENT, color_off_active=ICON,
                     color_on_active=ACCENT, color_disabled=ICON_DISABLED)
+
+
+def tray_icon(base_path: str, state: str) -> QIcon:
+    """Ícone do programa com o selo da situação no canto inferior direito, como recomenda a Microsoft."""
+    base = QIcon(base_path)
+    if qta is None or state not in _TRAY_BADGES:
+        return base
+    glyph, color = _TRAY_BADGES[state]
+    result = QIcon()
+    for size in _TRAY_SIZES:
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        badge = size * 0.62
+        ring = max(1.0, size / 16)
+        circle = QRectF(size - badge, size - badge, badge, badge).adjusted(ring / 2, ring / 2, -ring / 2, -ring / 2)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.drawPixmap(0, 0, base.pixmap(size, size))
+        painter.setPen(QPen(QColor(SURFACE), ring))
+        painter.setBrush(QColor(color))
+        painter.drawEllipse(circle)
+        mark = round(badge * 0.72)
+        painter.drawPixmap(round(circle.center().x() - mark / 2), round(circle.center().y() - mark / 2),
+                           qta.icon(glyph, color=ON_ACCENT).pixmap(mark, mark))
+        painter.end()
+        result.addPixmap(pixmap)
+    return result
 
 
 def _indicator_assets() -> dict:
@@ -124,6 +172,16 @@ QWidget#sidebar QToolButton {{
 QWidget#sidebar QToolButton:hover {{ background: #2b2e33; }}
 QWidget#sidebar QToolButton:checked {{ background: {WINDOW}; border-left-color: {ACCENT}; }}
 QLabel[muted="true"] {{ color: {MUTED}; }}
+QFrame#statusCard {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 6px; }}
+QTreeWidget {{
+    background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 5px;
+    selection-background-color: #2f4a6e;
+}}
+QTreeWidget::item {{ padding: 3px 2px; }}
+QTreeWidget::item:selected {{ background: #2f4a6e; color: {TEXT}; }}
+QHeaderView::section {{
+    background: {WINDOW}; color: {MUTED}; border: none; border-bottom: 1px solid {BORDER}; padding: 5px 6px;
+}}
 QCheckBox::indicator, QListWidget::indicator {{
     width: 14px; height: 14px; border: 1px solid #555b64; border-radius: 3px; background: {SURFACE};
 }}

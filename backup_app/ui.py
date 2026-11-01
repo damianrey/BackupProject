@@ -1,21 +1,20 @@
 """Telas da aplicação: login, registro de usuário e janela principal."""
 
 import os
-from contextlib import contextmanager
 from pathlib import Path
 
-from PyQt5.QtCore import QSize, Qt, QTime, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QIcon
+from PyQt5.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTime, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QFont, QIcon, QPainter
 from PyQt5.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
-    QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMessageBox, QPushButton, QRadioButton, QSpinBox, QStackedWidget, QTimeEdit,
-    QToolButton, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFrame,
+    QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMainWindow, QMessageBox, QPushButton, QRadioButton, QSizePolicy, QSpinBox, QStackedWidget, QTimeEdit,
+    QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import __version__, startup, users
+from . import __version__, history, startup, users
 from .backup import connect_mysql, connect_sqlserver, find_mysqldump
-from .icons import ACCENT, ON_ACCENT, icon, tab_icon
+from .icons import ACCENT, DANGER, MUTED, ON_ACCENT, SUCCESS, WARNING, icon, tab_icon
 from .log_config import error_log, main_log
 from .paths import BASE_DIR, LOGS_DIR, image
 from .scheduler import BackupScheduler
@@ -30,11 +29,13 @@ from .settings import (
 # ---------------------------------------------------------------------------
 # Utilitários
 # ---------------------------------------------------------------------------
-def icon_label(name: str, size: int = 16, tooltip: str = "") -> QLabel:
-    label = QLabel()
-    label.setPixmap(icon(name).pixmap(size, size))
-    label.setToolTip(tooltip)
-    return label
+HEALTH_STYLES = {
+    history.LEVEL_OK: ("ok", SUCCESS),
+    history.LEVEL_INFO: ("info", ACCENT),
+    history.LEVEL_RUNNING: ("running", ACCENT),
+    history.LEVEL_WARNING: ("warning", WARNING),
+    history.LEVEL_ERROR: ("error", DANGER),
+}
 
 
 def muted_label(text: str = "") -> QLabel:
@@ -86,13 +87,108 @@ def make_icon_button(icon_name: str, tooltip: str, slot) -> QPushButton:
     return button
 
 
-@contextmanager
-def busy_cursor():
-    QApplication.setOverrideCursor(Qt.WaitCursor)
+class StatusLine(QWidget):
+    """Mensagem na própria tela, com ícone, para o que não precisa de uma janela para fechar."""
+    HIDE_AFTER_MS = 5000
+
+    def __init__(self, auto_hide: bool = False):
+        super().__init__()
+        self._auto_hide = auto_hide
+        self._icon = QLabel()
+        self._text = muted_label()
+        policy = self._text.sizePolicy()
+        policy.setHorizontalPolicy(QSizePolicy.Ignored)  # uma mensagem longa quebra linha, não alarga a tela
+        self._text.setSizePolicy(policy)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(self._icon, 0, Qt.AlignTop)
+        layout.addWidget(self._text, 1)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.hide)
+        self.hide()
+
+    def show_message(self, level: str, text: str) -> None:
+        icon_name, color = HEALTH_STYLES[level]
+        self._icon.setPixmap(icon(icon_name, color, color).pixmap(16, 16))
+        self._text.setText(text)
+        self._text.setToolTip(text)
+        self.show()
+        self._timer.stop()
+        if self._auto_hide and level == history.LEVEL_OK:  # avisos ficam até serem lidos
+            self._timer.start(self.HIDE_AFTER_MS)
+
+    def text(self) -> str:
+        return self._text.text()
+
+
+class PlaceholderList(QListWidget):
+    """Lista que orienta o que fazer enquanto está vazia."""
+
+    def __init__(self, placeholder: str):
+        super().__init__()
+        self._placeholder = placeholder
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self.count() == 0:
+            painter = QPainter(self.viewport())
+            painter.setPen(QColor(MUTED))
+            painter.drawText(self.viewport().rect().adjusted(12, 0, -12, 0),
+                             Qt.AlignCenter | Qt.TextWordWrap, self._placeholder)
+
+
+def probe_mysql(creds: MySQLCredentials) -> str:
+    """Conecta ao MySQL e devolve a versão do servidor."""
+    conn = connect_mysql(creds)
     try:
-        yield
+        cur = conn.cursor()
+        cur.execute("SELECT VERSION()")
+        row = cur.fetchone()
+        cur.close()
+        return str(row[0]) if row and row[0] else ""
     finally:
-        QApplication.restoreOverrideCursor()
+        conn.close()
+
+
+def probe_sqlserver(creds: SQLServerCredentials) -> str:
+    """Conecta ao SQL Server e devolve a versão e a edição do servidor."""
+    conn = connect_sqlserver(creds)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT CAST(SERVERPROPERTY('ProductVersion') AS VARCHAR(50)), "
+            "CAST(SERVERPROPERTY('Edition') AS VARCHAR(100))"
+        )
+        row = cur.fetchone()
+        cur.close()
+        if row and row[0]:
+            return f"{row[0]} ({row[1]})" if row[1] else str(row[0])
+        return ""
+    finally:
+        conn.close()
+
+
+class _ConnectionTestSignals(QObject):
+    finished = pyqtSignal(str, object)  # versão do servidor, exceção (ou None)
+
+
+class ConnectionTest(QRunnable):
+    """Testa uma conexão fora da thread da interface, que congelaria até o tempo limite."""
+
+    def __init__(self, probe, creds):
+        super().__init__()
+        self.probe = probe
+        self.creds = creds
+        self.signals = _ConnectionTestSignals()
+
+    def run(self) -> None:  # executa na thread do pool
+        try:
+            version, error = self.probe(self.creds), None
+        except Exception as exc:
+            version, error = "", exc
+        self.signals.finished.emit(version, error)
 
 
 def open_folder(path: Path) -> None:
@@ -125,7 +221,7 @@ class LoginScreen(QMainWindow):
 
         # Define o titulo da tela e o tamanho fixo
         self.setWindowTitle("DBKeeper - Login")
-        self.setFixedSize(340, 300)
+        self.setFixedSize(340, 330)
         self.setWindowIcon(QIcon(image("app_icon.ico")))
 
         # Cabeçalho: ícone do programa + nome
@@ -151,6 +247,8 @@ class LoginScreen(QMainWindow):
         self.first_user_button.setFlat(True)
         self.first_user_button.setIcon(icon("register", ACCENT))
 
+        self.status = StatusLine()
+
         layout = QVBoxLayout()
         layout.setContentsMargins(32, 24, 32, 24)
         layout.setSpacing(10)
@@ -159,6 +257,7 @@ class LoginScreen(QMainWindow):
         layout.addSpacing(8)
         layout.addWidget(self.username_entry)
         layout.addWidget(self.password_entry)
+        layout.addWidget(self.status)
         layout.addWidget(self.login_button)
         layout.addWidget(self.first_user_button, alignment=Qt.AlignHCenter)
         layout.addStretch(1)
@@ -178,6 +277,7 @@ class LoginScreen(QMainWindow):
     def _reset_fields(self) -> None:
         self.username_entry.clear()
         self.password_entry.clear()
+        self.status.hide()
         self.username_entry.setFocus()
 
     # Função de login da tela inicial
@@ -198,15 +298,16 @@ class LoginScreen(QMainWindow):
             self.authenticated.emit(username)
         else:
             main_log.info(f"Tentativa de login sem sucesso para o usuario '{username}'.")
-            QMessageBox.critical(self, "Erro", "Usuario ou senha incorretos")
-            self._reset_fields()
+            self.status.show_message(history.LEVEL_ERROR, "Usuário ou senha incorretos.")
+            self.password_entry.clear()
+            self.password_entry.setFocus()
 
     def open_first_registration(self) -> None:
         if users.has_users():  # proteção extra: só o primeiro cadastro é livre
             self.first_user_button.hide()
             return
         if RegistrationScreen(self).exec_() == QDialog.Accepted:
-            QMessageBox.information(self, "Registro", "Usuário criado. Faça o login.")
+            self.status.show_message(history.LEVEL_OK, "Usuário criado. Faça o login.")
         self.first_user_button.setVisible(not users.has_users())
 
     # Esconde a tela de login em vez de fechar
@@ -439,6 +540,10 @@ class RuleDialog(QDialog):
 # ---------------------------------------------------------------------------
 # Janela principal
 # ---------------------------------------------------------------------------
+def result_icon(success: bool) -> QIcon:
+    return icon("ok", SUCCESS, SUCCESS) if success else icon("error", DANGER, DANGER)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, scheduler: BackupScheduler):
         super().__init__()
@@ -447,7 +552,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("DBKeeper")
         self.setWindowIcon(QIcon(image("app_icon.ico")))
         self.setMinimumSize(780, 560)
+        self._connection_tests = []  # mantém as tarefas vivas até o fim
 
+        self.home_tab = self._build_home_tab()
         self.settings_tab = self._build_connections_tab()
         self.schedule_tab = self._build_schedule_tab()
         self.system_tab = self._build_system_tab()
@@ -463,6 +570,7 @@ class MainWindow(QMainWindow):
         self.nav_buttons = QButtonGroup(self)
         self.nav_buttons.idClicked.connect(self.pages.setCurrentIndex)
         for index, (widget, icon_name, tooltip) in enumerate((
+            (self.home_tab, "home", "Início"),
             (self.settings_tab, "connections", "Conexões"),
             (self.schedule_tab, "schedule", "Agendamento"),
             (self.system_tab, "system", "Sistema"),
@@ -527,13 +635,110 @@ class MainWindow(QMainWindow):
         return edit
 
     @staticmethod
-    def _footer(*buttons: QPushButton) -> QHBoxLayout:
-        """Linha de botões alinhada à direita, no rodapé da aba."""
+    def _footer(*buttons: QPushButton, status: "StatusLine | None" = None) -> QHBoxLayout:
+        """Linha de botões alinhada à direita, no rodapé da aba, com a mensagem à esquerda."""
         row = QHBoxLayout()
-        row.addStretch(1)
+        if status is not None:
+            row.addWidget(status, 1)
+        row.addStretch()
         for button in buttons:
             row.addWidget(button)
         return row
+
+    # ================================================================== Aba Início
+    def _build_home_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(16)
+
+        # Situação geral: responde se os backups estão em dia
+        card = QFrame()
+        card.setObjectName("statusCard")
+        card_layout = QHBoxLayout(card)
+        card_layout.setContentsMargins(16, 14, 16, 14)
+        card_layout.setSpacing(14)
+        self.health_icon = QLabel()
+        self.health_title = QLabel()
+        title_font = QFont(self.health_title.font())
+        title_font.setPointSize(13)
+        title_font.setBold(True)
+        self.health_title.setFont(title_font)
+        self.health_detail = muted_label()
+        texts = QVBoxLayout()
+        texts.setSpacing(2)
+        texts.addWidget(self.health_title)
+        texts.addWidget(self.health_detail)
+        self.run_now_button = make_button("Executar agora", "run", self.run_backup_now, primary=True)
+        self.run_now_button.setToolTip("Executa o backup em segundo plano com a agenda salva.")
+        card_layout.addWidget(self.health_icon)
+        card_layout.addLayout(texts, 1)
+        card_layout.addWidget(self.run_now_button)
+        layout.addWidget(card)
+
+        # Último e próximo backup
+        moments = QHBoxLayout()
+        moments.setSpacing(20)
+        self.last_run_label, self.last_run_detail = self._add_moment(moments, "Último backup")
+        self.next_run_label, self.next_run_detail = self._add_moment(moments, "Próximo backup")
+        layout.addLayout(moments)
+
+        # Histórico
+        history_box = QGroupBox("Histórico")
+        history_layout = QVBoxLayout(history_box)
+        self.history_tree = QTreeWidget()
+        self.history_tree.setHeaderLabels(["Data", "Resultado", "Detalhes"])
+        self.history_tree.setRootIsDecorated(True)
+        self.history_tree.setUniformRowHeights(True)
+        header = self.history_tree.header()
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.history_empty = muted_label("Nenhum backup registrado ainda.")
+        history_layout.addWidget(self.history_tree, 1)
+        history_layout.addWidget(self.history_empty, 1, Qt.AlignTop)
+        layout.addWidget(history_box, 1)
+        self._history_key = None
+        return tab
+
+    @staticmethod
+    def _add_moment(row: QHBoxLayout, title: str):
+        box = QGroupBox(title)
+        box_layout = QVBoxLayout(box)
+        box_layout.setSpacing(2)
+        value = QLabel()
+        detail = muted_label()
+        box_layout.addWidget(value)
+        box_layout.addWidget(detail)
+        row.addWidget(box)
+        return value, detail
+
+    def _render_history(self, entries) -> None:
+        key = [(entry.started, entry.finished) for entry in entries]
+        if key == self._history_key:  # preserva o que o usuário expandiu na atualização automática
+            return
+        self._history_key = key
+        self.history_tree.clear()
+        for entry in entries:
+            item = QTreeWidgetItem([
+                entry.started.strftime("%d/%m/%Y %H:%M"),
+                "Concluído" if entry.success else "Com falhas",
+                f"{entry.summary} ({history.format_duration(entry)}, {entry.origin})",
+            ])
+            item.setIcon(1, result_icon(entry.success))
+            item.setToolTip(2, entry.summary)
+            for database in entry.databases:
+                child = QTreeWidgetItem([
+                    f"{database.engine}: {database.database}",
+                    "Concluído" if database.success else "Falhou",
+                    history.format_size(database.size) if database.success else database.message,
+                ])
+                child.setIcon(1, result_icon(database.success))
+                child.setToolTip(2, database.message)
+                item.addChild(child)
+            self.history_tree.addTopLevelItem(item)
+        self.history_tree.setVisible(bool(entries))
+        self.history_empty.setVisible(not entries)
 
     # ================================================================== Aba Conexões
     def _build_connections_tab(self) -> QWidget:
@@ -554,6 +759,8 @@ class MainWindow(QMainWindow):
         self.mysqldump_path = self._add_path_field(box, "executable", "Caminho do mysqldump.exe",
                                                    self._browse_mysqldump)
         box.addStretch(1)
+        self.mysql_status = StatusLine()
+        box.addWidget(self.mysql_status)
         self.test_mysql_button = make_button("Testar conexão", "test", self.test_mysql_connection)
         box.addWidget(self.test_mysql_button)
         groups.addWidget(mysql_box)
@@ -569,9 +776,20 @@ class MainWindow(QMainWindow):
         self.sqlserver_backup_dir = self._add_path_field(
             box, "folder", "Pasta de backup no servidor (opcional)", self._browse_sqlserver_dir)
         box.addStretch(1)
+        self.sql_status = StatusLine()
+        box.addWidget(self.sql_status)
         self.test_sql_server_button = make_button("Testar conexão", "test", self.test_sql_server_connection)
         box.addWidget(self.test_sql_server_button)
         groups.addWidget(sql_box)
+
+        # O resultado de um teste deixa de valer quando os dados mudam
+        for status, fields in (
+            (self.mysql_status, (self.mysql_host, self.mysql_username, self.mysql_password, self.mysql_port)),
+            (self.sql_status, (self.sql_server, self.sql_username, self.sql_password, self.sql_database,
+                               self.sql_port)),
+        ):
+            for field in fields:
+                field.textEdited.connect(lambda _text, line=status: line.hide())
 
         layout.addLayout(groups)
         layout.addWidget(muted_label(
@@ -581,7 +799,8 @@ class MainWindow(QMainWindow):
         layout.addStretch(1)
 
         self.save_button = make_button("Salvar configurações", "save", self.save_credentials, primary=True)
-        layout.addLayout(self._footer(self.save_button))
+        self.connections_status = StatusLine(auto_hide=True)
+        layout.addLayout(self._footer(self.save_button, status=self.connections_status))
         return tab
 
     def _browse_mysqldump(self) -> None:
@@ -646,23 +865,7 @@ class MainWindow(QMainWindow):
         if not creds.user:
             QMessageBox.information(self, "Testar conexão MySQL", "Preencha ao menos o usuário do MySQL!")
             return
-        version = ""
-        try:
-            with busy_cursor():
-                conn = connect_mysql(creds)
-                try:
-                    cur = conn.cursor()
-                    cur.execute("SELECT VERSION()")
-                    row = cur.fetchone()
-                    version = str(row[0]) if row and row[0] else ""
-                    cur.close()
-                finally:
-                    conn.close()
-        except Exception as exc:
-            QMessageBox.critical(self, "Erro", f"Erro ao conectar ao MySQL: {exc}")
-            return
-        details = f"\nVersão do servidor: {version}" if version else ""
-        QMessageBox.information(self, "Testar conexão MySQL", f"Conexão com o MySQL bem-sucedida!{details}")
+        self._start_connection_test(self.test_mysql_button, self.mysql_status, "MySQL", probe_mysql, creds)
 
     # Função para testar a conexão com SQL Server
     def test_sql_server_connection(self) -> None:
@@ -674,27 +877,29 @@ class MainWindow(QMainWindow):
         if not creds.server:
             QMessageBox.information(self, "Testar conexão SQL Server", "Preencha ao menos o servidor!")
             return
-        version = ""
-        try:
-            with busy_cursor():
-                conn = connect_sqlserver(creds)
-                try:
-                    cur = conn.cursor()
-                    cur.execute(
-                        "SELECT CAST(SERVERPROPERTY('ProductVersion') AS VARCHAR(50)), "
-                        "CAST(SERVERPROPERTY('Edition') AS VARCHAR(100))"
-                    )
-                    row = cur.fetchone()
-                    if row and row[0]:
-                        version = f"{row[0]} ({row[1]})" if row[1] else str(row[0])
-                    cur.close()
-                finally:
-                    conn.close()
-        except Exception as exc:
-            QMessageBox.critical(self, "Erro", f"Erro ao conectar ao SQL Server: {exc}")
-            return
-        details = f"\nVersão do servidor: {version}" if version else ""
-        QMessageBox.information(self, "Testar conexão SQL Server", f"Conexão com o SQL Server bem-sucedida!{details}")
+        self._start_connection_test(self.test_sql_server_button, self.sql_status, "SQL Server",
+                                    probe_sqlserver, creds)
+
+    def _start_connection_test(self, button: QPushButton, status: StatusLine, engine: str, probe, creds) -> None:
+        label = button.text()
+        button.setEnabled(False)
+        button.setText("Testando...")
+        status.show_message(history.LEVEL_RUNNING, f"Conectando ao {engine}...")
+        task = ConnectionTest(probe, creds)
+
+        def finished(version: str, error) -> None:
+            self._connection_tests.remove(task)
+            button.setText(label)
+            button.setEnabled(True)
+            if error is not None:
+                status.show_message(history.LEVEL_ERROR, f"Erro ao conectar ao {engine}: {error}")
+            else:
+                details = f" Versão do servidor: {version}" if version else ""
+                status.show_message(history.LEVEL_OK, f"Conexão bem-sucedida.{details}")
+
+        task.signals.finished.connect(finished)
+        self._connection_tests.append(task)
+        QThreadPool.globalInstance().start(task)
 
     # Função para salvar as credenciais das conexões aos bancos de dados
     def save_credentials(self) -> None:
@@ -722,7 +927,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Erro", f"Não foi possível salvar as configurações:\n{exc}")
             return
         main_log.info("Configurações de conexão salvas.")
-        QMessageBox.information(self, "Salvar", "Configurações salvas com sucesso!")
+        self.connections_status.show_message(history.LEVEL_OK, "Configurações salvas.")
 
     # ================================================================== Aba Agendamento
     def _build_schedule_tab(self) -> QWidget:
@@ -734,13 +939,16 @@ class MainWindow(QMainWindow):
         # Regras: cada item tem uma caixa para ativar/desativar sem apagar
         rules_box = QGroupBox("Regras de agendamento")
         rules_layout = QHBoxLayout(rules_box)
-        self.rules_list = QListWidget()
+        self.rules_list = PlaceholderList("Nenhuma regra ainda. Clique em Adicionar para criar a primeira.")
         self.rules_list.itemDoubleClicked.connect(lambda _item: self._edit_rule())
         self.rules_list.itemChanged.connect(lambda _item: self._update_schedule_preview())
+        self.rules_list.itemSelectionChanged.connect(self._update_rule_buttons)
+        self.edit_rule_button = make_button("Editar", "edit", self._edit_rule)
+        self.remove_rule_button = make_button("Remover", "remove", self._remove_rule)
         rules_buttons = QVBoxLayout()
-        for label, icon_name, slot in (("Adicionar", "add", self._add_rule), ("Editar", "edit", self._edit_rule),
-                                       ("Remover", "remove", self._remove_rule)):
-            rules_buttons.addWidget(make_button(label, icon_name, slot))
+        rules_buttons.addWidget(make_button("Adicionar", "add", self._add_rule))
+        rules_buttons.addWidget(self.edit_rule_button)
+        rules_buttons.addWidget(self.remove_rule_button)
         rules_buttons.addStretch()
         rules_layout.addWidget(self.rules_list)
         rules_layout.addLayout(rules_buttons)
@@ -772,25 +980,12 @@ class MainWindow(QMainWindow):
         engines.addStretch()
         layout.addLayout(engines)
 
-        # Status
-        status_box = QGroupBox("Status")
-        status = QGridLayout(status_box)
-        status.setColumnStretch(1, 1)
-        self.next_run_label = QLabel()
-        self.last_run_label = QLabel()
-        self.last_run_label.setWordWrap(True)
-        status.addWidget(icon_label("clock"), 0, 0)
-        status.addWidget(self.next_run_label, 0, 1)
-        status.addWidget(icon_label("logs"), 1, 0, Qt.AlignTop)
-        status.addWidget(self.last_run_label, 1, 1)
-        layout.addWidget(status_box)
         layout.addStretch(1)
 
         self.save_button_schedule = make_button("Salvar configurações", "save",
                                                 lambda: self.save_schedule(show_message=True), primary=True)
-        self.run_now_button = make_button("Executar agora", "run", self.run_backup_now)
-        self.run_now_button.setToolTip("Salva a agenda atual e executa o backup em segundo plano.")
-        layout.addLayout(self._footer(self.run_now_button, self.save_button_schedule))
+        self.schedule_status = StatusLine(auto_hide=True)
+        layout.addLayout(self._footer(self.save_button_schedule, status=self.schedule_status))
         return tab
 
     def _render_rules(self, select: int = -1) -> None:
@@ -804,7 +999,13 @@ class MainWindow(QMainWindow):
         self.rules_list.blockSignals(False)
         if 0 <= select < len(self._rules):
             self.rules_list.setCurrentRow(select)
+        self._update_rule_buttons()
         self._update_schedule_preview()
+
+    def _update_rule_buttons(self) -> None:
+        selected = bool(self.rules_list.selectedItems())
+        self.edit_rule_button.setEnabled(selected)
+        self.remove_rule_button.setEnabled(selected)
 
     def _sync_rule_states(self) -> None:
         """Copia o estado das caixas de seleção da lista para as regras."""
@@ -867,37 +1068,44 @@ class MainWindow(QMainWindow):
         jobs = self.scheduler.reload(settings)
         if show_message:
             if jobs and not (settings.use_mysql or settings.use_sql_server):
-                QMessageBox.warning(self, "Agendamento",
-                                    "Agenda salva, mas nenhum banco (MySQL/SQL Server) está selecionado.")
+                self.schedule_status.show_message(
+                    history.LEVEL_WARNING, "Agenda salva, mas nenhum banco (MySQL/SQL Server) está selecionado.")
+            elif jobs:
+                self.schedule_status.show_message(history.LEVEL_OK, f"Agenda salva: {len(jobs)} regra(s) ativa(s).")
             else:
-                QMessageBox.information(self, "Agendamento",
-                                        "Agenda salva:\n" + ("\n".join(jobs) or "nenhuma regra ativa"))
+                self.schedule_status.show_message(history.LEVEL_WARNING, "Agenda salva, sem nenhuma regra ativa.")
         return True
 
     def run_backup_now(self) -> None:
-        if not self.save_schedule(show_message=False):
-            return
         if not self.scheduler.trigger("manual"):
             QMessageBox.information(self, "Backup", "Já existe um backup em andamento.")
 
     def refresh_status(self) -> None:
+        entries = history.load()
+        running = self.scheduler.is_running
         next_run = self.scheduler.next_run()
-        if next_run:
-            self.next_run_label.setText(
-                f"Próximo backup: {DAY_LABELS[day_of(next_run)]}, {next_run.strftime('%d/%m/%Y %H:%M')}")
-        else:
-            self.next_run_label.setText("Próximo backup: nenhum agendado")
+        health = self.scheduler.health(entries)
 
-        report = self.scheduler.last_report
-        if self.scheduler.is_running:
-            self.last_run_label.setText("Backup em andamento...")
-        elif report is not None:
-            when = (report.finished or report.started).strftime("%d/%m/%Y %H:%M")
-            status = "OK" if report.success else "COM FALHAS"
-            self.last_run_label.setText(f"Último backup ({when}) - {status}: {report.summary()}")
+        icon_name, color = HEALTH_STYLES[health.level]
+        self.health_icon.setPixmap(icon(icon_name, color, color).pixmap(32, 32))
+        self.health_title.setText(health.title)
+        self.health_detail.setText(health.detail)
+        self.run_now_button.setEnabled(not running)
+
+        if entries:
+            latest = entries[0]
+            self.last_run_label.setText(latest.finished.strftime("%d/%m/%Y %H:%M"))
+            self.last_run_detail.setText(history.format_relative(latest.finished))
         else:
-            self.last_run_label.setText("Último backup: nenhum nesta sessão")
-        self.run_now_button.setEnabled(not self.scheduler.is_running)
+            self.last_run_label.setText("Nenhum")
+            self.last_run_detail.setText("")
+        if next_run:
+            self.next_run_label.setText(f"{DAY_LABELS[day_of(next_run)]}, {next_run.strftime('%d/%m/%Y %H:%M')}")
+            self.next_run_detail.setText(history.format_relative(next_run))
+        else:
+            self.next_run_label.setText("Nenhum agendado")
+            self.next_run_detail.setText("")
+        self._render_history(entries)
 
     # ================================================================== Aba Sistema
     def _build_system_tab(self) -> QWidget:
@@ -918,7 +1126,8 @@ class MainWindow(QMainWindow):
         folder = QVBoxLayout(folder_box)
         self.backup_dir = self._add_path_field(folder, "folder", f"Padrão: {BASE_DIR}", self._browse_backup_dir)
         self.save_system_button = make_button("Salvar pasta", "save", self.save_system, primary=True)
-        folder.addLayout(self._footer(self.save_system_button))
+        self.system_status = StatusLine(auto_hide=True)
+        folder.addLayout(self._footer(self.save_system_button, status=self.system_status))
         layout.addWidget(folder_box)
 
         tools_box = QGroupBox("Ferramentas")
@@ -980,4 +1189,4 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Erro", f"Não foi possível salvar:\n{exc}")
             return
         main_log.info(f"Pasta de backups alterada para '{settings.backup_root}'.")
-        QMessageBox.information(self, "Pasta de backups", f"Os backups serão gravados em:\n{settings.backup_root}")
+        self.system_status.show_message(history.LEVEL_OK, f"Os backups serão gravados em {settings.backup_root}")

@@ -8,9 +8,9 @@ from PyQt5.QtGui import QIcon
 from PyQt5.QtNetwork import QLocalServer, QLocalSocket
 from PyQt5.QtWidgets import QAction, QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
-from . import startup
+from . import history, startup
 from .backup import BackupReport
-from .icons import apply_theme, icon
+from .icons import apply_theme, icon, tray_icon
 from .locks import InterProcessLock
 from .log_config import error_log, main_log
 from .paths import APP_LOCK_FILE, BASE_DIR, image
@@ -54,12 +54,14 @@ def notify_running_instance() -> bool:
 class BackupApplication(QObject):
     TRAY_RETRY_MS = 2000
     TRAY_MAX_RETRIES = 30  # ~1 minuto esperando a bandeja ficar disponível no boot
+    TRAY_REFRESH_MS = 60_000  # percebe backups do --backup e a passagem do tempo
 
     def __init__(self, app: QApplication, start_hidden: bool):
         super().__init__()
         self.app = app
         self.tray = None
         self._tray_menu = None
+        self._tray_level = None
         self._tray_retries = 0
         self._quit_pending = False
 
@@ -70,7 +72,7 @@ class BackupApplication(QObject):
 
         self.scheduler.backup_started.connect(self._on_backup_started)
         self.scheduler.backup_finished.connect(self._on_backup_finished)
-        self.scheduler.schedule_changed.connect(self._update_tray_tooltip)
+        self.scheduler.schedule_changed.connect(self._refresh_tray)
 
         self._server = QLocalServer(self)
         self._start_ipc_server()
@@ -137,7 +139,12 @@ class BackupApplication(QObject):
         self.tray.setContextMenu(self._tray_menu)
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
-        self._update_tray_tooltip()
+        self._refresh_tray()
+
+        refresh_timer = QTimer(self)
+        refresh_timer.setInterval(self.TRAY_REFRESH_MS)
+        refresh_timer.timeout.connect(self._refresh_tray)
+        refresh_timer.start()
 
     def _on_tray_activated(self, reason) -> None:
         if reason == QSystemTrayIcon.DoubleClick:
@@ -147,16 +154,19 @@ class BackupApplication(QObject):
         if self.tray is not None and self.tray.isVisible():
             self.tray.showMessage(title, message, icon, 8000)
 
-    def _update_tray_tooltip(self) -> None:
+    def _refresh_tray(self) -> None:
+        """Ícone e dica da bandeja acompanham a situação geral mostrada na tela Início."""
         if self.tray is None:
             return
-        if self.scheduler.is_running:
-            text = "Backup em andamento..."
-        else:
-            next_run = self.scheduler.next_run()
-            text = (f"Próximo backup: {DAY_LABELS[day_of(next_run)]} {next_run.strftime('%H:%M')}"
-                    if next_run else "Nenhum backup agendado")
-        self.tray.setToolTip(f"{APP_NAME}\n{text}")
+        health = self.scheduler.health(history.load())
+        if health.level != self._tray_level:
+            self._tray_level = health.level
+            self.tray.setIcon(tray_icon(image("app_icon.ico"), health.level))
+        lines = [APP_NAME, health.title]
+        next_run = self.scheduler.next_run()
+        if next_run and health.level != history.LEVEL_RUNNING:
+            lines.append(f"Próximo backup: {DAY_LABELS[day_of(next_run)]} {next_run.strftime('%H:%M')}")
+        self.tray.setToolTip("\n".join(lines))
 
     # ------------------------------------------------------------------ ações
     def show_login(self) -> None:
@@ -179,12 +189,12 @@ class BackupApplication(QObject):
             self._notify(APP_NAME, "Já existe um backup em andamento.")
 
     def _on_backup_started(self, origin: str) -> None:
-        self._update_tray_tooltip()
+        self._refresh_tray()
         if origin == "manual":
             self._notify(APP_NAME, "Backup iniciado em segundo plano.")
 
     def _on_backup_finished(self, report: BackupReport) -> None:
-        self._update_tray_tooltip()
+        self._refresh_tray()
         if report.success:
             self._notify("Backup concluído", report.summary())
         else:

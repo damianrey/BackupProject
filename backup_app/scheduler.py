@@ -18,9 +18,10 @@ from typing import List, Optional
 import schedule
 from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
 
+from . import history
 from .backup import BackupAlreadyRunning, BackupReport, run_backup
 from .log_config import error_log, exception_log, main_log
-from .settings import DAY_LABELS, AppSettings, all_slots
+from .settings import DAY_LABELS, AppSettings, all_slots, load_settings
 
 _WEEKDAY_JOBS = {
     "Segunda": lambda s: s.every().monday,
@@ -102,6 +103,12 @@ class BackupScheduler(QObject):
 
     def next_run(self):
         return self._scheduler.next_run if self._scheduler.jobs else None
+
+    def health(self, entries: List[history.HistoryEntry]) -> history.Health:
+        """Situação geral, a mesma na tela Início e na bandeja."""
+        settings = load_settings()
+        return history.evaluate(entries, self.next_run() is not None,
+                                settings.use_mysql or settings.use_sql_server, self.is_running)
 
     def _tick(self) -> None:
         try:

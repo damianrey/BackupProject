@@ -22,6 +22,7 @@ from pathlib import Path, PureWindowsPath
 from typing import List, Optional, Tuple
 
 from .locks import InterProcessLock
+from . import history
 from .log_config import error_log, exception_log, main_log
 from .paths import BACKUP_LOCK_FILE
 from .security import SecretBox, load_key
@@ -690,4 +691,5 @@ def run_backup(origin: str = "manual") -> BackupReport:
         error_log.error(report.error)
     report.finished = datetime.now()
     main_log.info(f"Backup finalizado ({origin}): {report.summary()}")
+    history.record(report)
     return report
