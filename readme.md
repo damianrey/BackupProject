@@ -146,8 +146,11 @@ DBKeeper/
 
 ```powershell
 pip install pyinstaller
-pyinstaller --noconsole --onedir --name DBKeeper --icon images/app_icon.ico --add-data "images;images" DBKeeper.py
+pyinstaller --noconfirm --clean DBKeeper.spec
 ```
+
+`DBKeeper.spec` keeps only the Qt files the app uses and leaves out `mysql-connector-python`, cutting the package roughly in half.  
+O `DBKeeper.spec` leva só os arquivos do Qt que o programa usa e deixa de fora o `mysql-connector-python`, reduzindo o pacote a cerca da metade.
 
 ---
 

@@ -12,6 +12,7 @@ env/
 build/
 dist/
 *.spec
+!DBKeeper.spec
 build-commands.txt
 
 # Segredos, locks e logs em tempo de execução
