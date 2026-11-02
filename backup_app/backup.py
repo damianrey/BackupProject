@@ -19,7 +19,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path, PureWindowsPath
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from .locks import InterProcessLock
 from . import history
@@ -44,6 +44,7 @@ LEGACY_MYSQLDUMP_PATHS = (
 
 CONNECT_TIMEOUT = 10                 # segundos para abrir conexão
 MYSQLDUMP_TIMEOUT = 4 * 60 * 60      # 4h: um dump travado não pode bloquear os próximos backups
+DUMP_END_MARKER = b"-- Dump completed"  # o mysqldump só escreve esta linha ao terminar
 
 # Evita que uma janela de console pisque a cada mysqldump em um app sem console
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -63,6 +64,7 @@ class BackupResult:
     success: bool
     message: str
     path: Optional[str] = None
+    verified: bool = False
 
 
 @dataclass
@@ -261,6 +263,14 @@ def _run_mysqldump_cmd(
     )
 
 
+def dump_is_complete(path: Path) -> bool:
+    """Um dump interrompido não tem a linha final, mesmo que o mysqldump não acuse erro."""
+    with open(path, "rb") as file:
+        file.seek(0, os.SEEK_END)
+        file.seek(max(0, file.tell() - 1024))
+        return DUMP_END_MARKER in file.read()
+
+
 def _dump_mysql(
     mysqldump: str,
     creds: MySQLCredentials,
@@ -308,6 +318,8 @@ def _dump_mysql(
             raise RuntimeError(stderr or f"mysqldump retornou o código {process.returncode}")
         if not partial.is_file() or partial.stat().st_size == 0:
             raise RuntimeError("o arquivo gerado está vazio")
+        if not dump_is_complete(partial):
+            raise RuntimeError("o arquivo gerado está incompleto")
 
         # Só substitui o backup anterior quando o novo foi gerado com sucesso
         os.replace(partial, destination)
@@ -318,8 +330,9 @@ def _dump_mysql(
             "MySQL",
             database,
             True,
-            f"MySQL{ver_info}: backup de {database} realizado em '{destination}'!",
+            f"MySQL{ver_info}: backup de {database} realizado e verificado em '{destination}'!",
             str(destination),
+            verified=True,
         )
     except subprocess.TimeoutExpired:
         message = f"Falha no backup da base de dados '{database}' do MySQL: tempo limite excedido."
@@ -345,11 +358,58 @@ def _dump_mysql(
 # Os arquivos levam data e hora no nome (banco_2026-10-29_1200.sql), o que permite
 # vários backups por dia. Os antigos são apagados pela retenção, não sobrescritos.
 STAMP_FORMAT = "%Y-%m-%d_%H%M"
+SAFETY_SUFFIX = "_antes_da_restauracao"  # cópia feita antes de substituir um banco
 _STAMP_PATTERN = r"(\d{4}-\d{2}-\d{2}_\d{4})"
 
 
 def backup_file_name(database: str, stamp: str, extension: str) -> str:
     return f"{database}_{stamp}{extension}"
+
+
+def list_backups(folder: Path, extension: str) -> Dict[str, List[Tuple[datetime, Path]]]:
+    """Backups no padrão do programa, por banco, do mais antigo ao mais recente."""
+    pattern = re.compile("(.+)_" + _STAMP_PATTERN + re.escape(extension) + "$", re.IGNORECASE)
+    backups: Dict[str, List[Tuple[datetime, Path]]] = {}
+    for path in folder.glob(f"*{extension}"):
+        match = pattern.match(path.name)
+        if not match:
+            continue
+        try:
+            moment = datetime.strptime(match.group(2), STAMP_FORMAT)
+        except ValueError:
+            continue
+        backups.setdefault(match.group(1), []).append((moment, path))
+    for items in backups.values():
+        items.sort()
+    return backups
+
+
+def expired_backups(backups: List[Tuple[datetime, Path]], keep_days: int,
+                    now: Optional[datetime] = None) -> List[Path]:
+    """Arquivos fora do prazo de `keep_days` dias; o mais recente nunca entra na lista."""
+    if keep_days <= 0:
+        return []
+    limit = (now or datetime.now()) - timedelta(days=keep_days)
+    return [path for moment, path in backups[:-1] if moment < limit]
+
+
+def backup_locations(settings: AppSettings) -> List[Tuple[str, Path, str]]:
+    """Onde ficam os backups: (nome do banco de dados, pasta, extensão)."""
+    custom = settings.sqlserver_backup_dir.strip()
+    return [
+        ("MySQL", settings.backup_root / MYSQL_FOLDER, ".sql"),
+        ("SQL Server", Path(custom) if custom else settings.backup_root / SQL_FOLDER, ".bak"),
+    ]
+
+
+def retention_preview(settings: AppSettings, keep_days: int) -> List[Path]:
+    """Backups que seriam apagados com o prazo de `keep_days` dias."""
+    paths: List[Path] = []
+    for _engine, folder, extension in backup_locations(settings):
+        for database, backups in list_backups(folder, extension).items():
+            if not database.endswith(SAFETY_SUFFIX):  # cópias de segurança não passam pela retenção
+                paths += expired_backups(backups, keep_days)
+    return paths
 
 
 def apply_retention(folder: Path, database: str, extension: str, keep_days: int,
@@ -359,24 +419,10 @@ def apply_retention(folder: Path, database: str, extension: str, keep_days: int,
     Só considera arquivos no padrão gerado pelo programa e nunca apaga o backup
     mais recente do banco (mesmo que seja antigo). Retorna quantos foram apagados.
     """
-    if keep_days <= 0:
-        return 0
-    pattern = re.compile(re.escape(database) + "_" + _STAMP_PATTERN + re.escape(extension) + "$", re.IGNORECASE)
-    backups = []
-    for path in folder.glob(f"{glob.escape(database)}_*{extension}"):
-        match = pattern.match(path.name)
-        if not match:
-            continue
-        try:
-            backups.append((datetime.strptime(match.group(1), STAMP_FORMAT), path))
-        except ValueError:
-            continue
-    backups.sort()
-    limit = (now or datetime.now()) - timedelta(days=keep_days)
+    backups = sorted(item for name, items in list_backups(folder, extension).items()
+                     if name.lower() == database.lower() for item in items)
     removed = 0
-    for moment, path in backups[:-1]:  # o mais recente sempre fica
-        if moment >= limit:
-            break
+    for path in expired_backups(backups, keep_days, now):
         try:
             path.unlink()
             removed += 1
@@ -385,7 +431,6 @@ def apply_retention(folder: Path, database: str, extension: str, keep_days: int,
     if removed:
         main_log.info(f"Retenção: {removed} backup(s) antigo(s) de {database} apagado(s) em '{folder}'.")
     return removed
-
 
 def backup_mysql(settings: AppSettings, creds: MySQLCredentials, stamp: str,
                  on_progress: Optional[ProgressCallback] = None) -> List[BackupResult]:
@@ -574,12 +619,38 @@ def connect_sqlserver(
     raise ConnectionError(errors[0] if errors else "Não foi possível conectar ao SQL Server.")
 
 
-def _quote_identifier(name: str) -> str:
+def quote_identifier(name: str) -> str:
     return "[" + name.replace("]", "]]") + "]"
 
 
-def _quote_literal(text: str) -> str:
+def quote_literal(text: str) -> str:
     return "N'" + text.replace("'", "''") + "'"
+
+
+def execute_all(cursor, statement: str) -> None:
+    cursor.execute(statement)
+    # É obrigatório consumir todas as mensagens de progresso do BACKUP e do RESTORE
+    # em SQL Server 2008–2019; caso contrário o comando é abortado ao fechar a conexão.
+    while cursor.nextset():
+        pass
+
+
+def sqlserver_backup_path(settings: AppSettings, file_name: str) -> str:
+    if settings.sqlserver_backup_dir.strip():
+        # Pasta informada como o SQL Server a enxerga (pode ser em outra máquina)
+        return str(PureWindowsPath(settings.sqlserver_backup_dir.strip()) / file_name)
+    folder = settings.backup_root / SQL_FOLDER
+    folder.mkdir(parents=True, exist_ok=True)
+    return str(folder / file_name)
+
+
+def backup_and_verify(cursor, database: str, destination: str) -> None:
+    # Sintaxe T-SQL compatível de SQL Server 2008 até 2019+:
+    # WITH INIT, FORMAT sobrescreve o arquivo (caso dois backups caiam no mesmo
+    # minuto) em vez de acrescentar um novo backup ao mesmo .bak.
+    disk = quote_literal(destination)
+    execute_all(cursor, f"BACKUP DATABASE {quote_identifier(database)} TO DISK = {disk} WITH INIT, FORMAT")
+    execute_all(cursor, f"RESTORE VERIFYONLY FROM DISK = {disk}")
 
 
 def backup_sqlserver(settings: AppSettings, creds: SQLServerCredentials, stamp: str) -> List[BackupResult]:
@@ -594,22 +665,7 @@ def backup_sqlserver(settings: AppSettings, creds: SQLServerCredentials, stamp: 
             )
         ]
 
-    file_name = backup_file_name(database, stamp, ".bak")
-    if settings.sqlserver_backup_dir.strip():
-        # Pasta informada como o SQL Server a enxerga (pode ser em outra máquina)
-        destination = str(PureWindowsPath(settings.sqlserver_backup_dir.strip()) / file_name)
-    else:
-        folder = settings.backup_root / SQL_FOLDER
-        folder.mkdir(parents=True, exist_ok=True)
-        destination = str(folder / file_name)
-
-    # Sintaxe T-SQL compatível de SQL Server 2008 até 2019+:
-    # WITH INIT, FORMAT sobrescreve o arquivo (caso dois backups caiam no mesmo
-    # minuto) em vez de acrescentar um novo backup ao mesmo .bak.
-    statement = (
-        f"BACKUP DATABASE {_quote_identifier(database)} "
-        f"TO DISK = {_quote_literal(destination)} WITH INIT, FORMAT"
-    )
+    destination = sqlserver_backup_path(settings, backup_file_name(database, stamp, ".bak"))
     try:
         connection = connect_sqlserver(creds, database="master", autocommit=True)
         try:
@@ -621,11 +677,7 @@ def backup_sqlserver(settings: AppSettings, creds: SQLServerCredentials, stamp: 
             except Exception:
                 sql_version = ""
 
-            cursor.execute(statement)
-            # É obrigatório consumir todas as mensagens do progresso do BACKUP DATABASE
-            # em SQL Server 2008–2019; caso contrário o backup é abortado ao fechar a conexão.
-            while cursor.nextset():
-                pass
+            backup_and_verify(cursor, database, destination)
             cursor.close()
         finally:
             connection.close()
@@ -650,8 +702,9 @@ def backup_sqlserver(settings: AppSettings, creds: SQLServerCredentials, stamp: 
             "SQL Server",
             database,
             True,
-            f"SQL{ver_info}: backup de {database} realizado em '{destination}'!",
+            f"SQL{ver_info}: backup de {database} realizado e verificado em '{destination}'!",
             destination,
+            verified=True,
         )
     ]
 

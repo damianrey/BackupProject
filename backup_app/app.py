@@ -215,6 +215,7 @@ class BackupApplication(QObject):
         self.main_window.show()
         self.main_window.raise_()
         self.main_window.activateWindow()
+        QTimer.singleShot(0, self.main_window.offer_setup)  # depois que a janela aparecer
 
     def backup_now(self) -> None:
         if not self.scheduler.trigger("manual"):

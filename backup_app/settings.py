@@ -190,6 +190,7 @@ class AppSettings:
     sqlserver_backup_dir: str = ""  # vazio = <backup_dir>\sql (pasta vista pelo SQL Server)
     notify_start: bool = False      # falhas são sempre avisadas
     notify_success: bool = False
+    setup_done: bool = False        # assistente concluído ou dispensado
 
     @property
     def backup_root(self) -> Path:
@@ -280,7 +281,13 @@ def load_settings() -> AppSettings:
     settings.sqlserver_backup_dir = config.get("Paths", "sqlserver_backup_dir", fallback="")
     settings.notify_start = _get_bool(config, "Notifications", "start")
     settings.notify_success = _get_bool(config, "Notifications", "success")
+    settings.setup_done = _get_bool(config, "Setup", "done")
     return settings
+
+
+def needs_setup(settings: AppSettings) -> bool:
+    """Instalação nova: nada configurado e o assistente ainda não foi concluído nem dispensado."""
+    return not (settings.setup_done or settings.use_mysql or settings.use_sql_server or settings.rules)
 
 
 def save_settings(settings: AppSettings) -> None:
@@ -306,6 +313,7 @@ def save_settings(settings: AppSettings) -> None:
         "start": str(settings.notify_start),
         "success": str(settings.notify_success),
     }
+    config["Setup"] = {"done": str(settings.setup_done)}
     _write_config(config, SETTINGS_FILE)
 
 

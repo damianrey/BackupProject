@@ -8,6 +8,7 @@ Módulos:
     users       -> cadastro e login de usuários
     settings    -> leitura/gravação de settings.ini e dbcredentials.ini
     backup      -> execução dos backups (sem Qt, pode rodar sem interface)
+    restore     -> restauração de backups (sem Qt)
     scheduler   -> agendamento + worker em segundo plano (Qt)
     startup     -> inicialização automática com o Windows
     ui          -> telas (login, registro, janela principal)

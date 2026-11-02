@@ -1,7 +1,9 @@
 """Telas da aplicação: login, registro de usuário e janela principal."""
 
 import os
+import re
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 from PyQt5.QtCore import QObject, QRunnable, QSize, Qt, QThreadPool, QTime, QTimer, pyqtSignal
@@ -19,16 +21,20 @@ except ImportError:  # pragma: no cover - módulo exclusivo do Windows
     QWinTaskbarButton = None
 
 from . import __version__, history, startup, users
-from .backup import connect_mysql, connect_sqlserver, find_mysqldump
+from .backup import connect_mysql, connect_sqlserver, find_mysqldump, retention_preview
 from .icons import ACCENT, DANGER, MUTED, ON_ACCENT, SUCCESS, WARNING, icon, tab_icon
 from .log_config import error_log, main_log
 from .paths import BASE_DIR, LOGS_DIR, image
+from .restore import (
+    ENGINE_MYSQL, ENGINE_SQLSERVER, BackupFile, RestoreRequest, available_backups, original_database,
+    restore_backup, suggested_target, target_problem,
+)
 from .scheduler import BackupScheduler
 from .security import CryptoKeyError, SecretBox, load_key
 from .settings import (
     DAY_LABELS, DAY_SHORT, DAYS, DEFAULT_MYSQL_PORT, MIN_INTERVAL_MINUTES, MODE_INTERVAL, MODE_TIMES,
     DbCredentials, MySQLCredentials, ScheduleRule, SQLServerCredentials, day_of, format_interval,
-    load_credentials, load_settings, parse_port, save_credentials, save_settings, upcoming_runs,
+    load_credentials, load_settings, needs_setup, parse_port, save_credentials, save_settings, upcoming_runs,
 )
 
 
@@ -208,25 +214,47 @@ def probe_sqlserver(creds: SQLServerCredentials) -> str:
         conn.close()
 
 
-class _ConnectionTestSignals(QObject):
-    finished = pyqtSignal(str, object)  # versão do servidor, exceção (ou None)
+class _BackgroundCallSignals(QObject):
+    finished = pyqtSignal(str, object)  # resultado, exceção (ou None)
 
 
-class ConnectionTest(QRunnable):
-    """Testa uma conexão fora da thread da interface, que congelaria até o tempo limite."""
+class BackgroundCall(QRunnable):
+    """Executa uma chamada demorada fora da thread da interface, que congelaria até o fim."""
 
-    def __init__(self, probe, creds):
+    def __init__(self, function, argument):
         super().__init__()
-        self.probe = probe
-        self.creds = creds
-        self.signals = _ConnectionTestSignals()
+        self.function = function
+        self.argument = argument
+        self.signals = _BackgroundCallSignals()
 
     def run(self) -> None:  # executa na thread do pool
         try:
-            version, error = self.probe(self.creds), None
+            result, error = self.function(self.argument), None
         except Exception as exc:
-            version, error = "", exc
-        self.signals.finished.emit(version, error)
+            result, error = "", exc
+        self.signals.finished.emit(result, error)
+
+
+def start_connection_test(tests: list, button: QPushButton, status: StatusLine, engine: str, probe, creds) -> None:
+    label = button.text()
+    button.setEnabled(False)
+    button.setText("Testando...")
+    status.show_message(history.LEVEL_RUNNING, f"Conectando ao {engine}...")
+    task = BackgroundCall(probe, creds)
+
+    def finished(version: str, error) -> None:
+        tests.remove(task)  # a lista mantém a tarefa viva até o fim
+        button.setText(label)
+        button.setEnabled(True)
+        if error is not None:
+            status.show_message(history.LEVEL_ERROR, connection_error_text(engine, error), str(error))
+        else:
+            details = f" Versão do servidor: {version}" if version else ""
+            status.show_message(history.LEVEL_OK, f"Conexão bem-sucedida.{details}")
+
+    task.signals.finished.connect(finished)
+    tests.append(task)
+    QThreadPool.globalInstance().start(task)
 
 
 def open_folder(path: Path) -> None:
@@ -581,6 +609,12 @@ def result_icon(success: bool) -> QIcon:
     return icon("ok", SUCCESS, SUCCESS) if success else icon("error", DANGER, DANGER)
 
 
+def database_detail(database: history.DatabaseEntry) -> str:
+    if not database.success:
+        return database.message
+    return " • ".join(filter(None, (history.format_size(database.size), "verificado" if database.verified else "")))
+
+
 class MainWindow(QMainWindow):
     def __init__(self, scheduler: BackupScheduler):
         super().__init__()
@@ -598,7 +632,7 @@ class MainWindow(QMainWindow):
         self.schedule_tab = self._build_schedule_tab()
         self.system_tab = self._build_system_tab()
 
-        # Barra lateral só com ícones (botões exclusivos) + páginas empilhadas
+        # Barra lateral (botões exclusivos) + páginas empilhadas
         self.pages = QStackedWidget()
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
@@ -608,7 +642,7 @@ class MainWindow(QMainWindow):
         nav.setSpacing(4)
         self.nav_buttons = QButtonGroup(self)
         self.nav_buttons.idClicked.connect(self.pages.setCurrentIndex)
-        for index, (widget, icon_name, tooltip) in enumerate((
+        for index, (widget, icon_name, name) in enumerate((
             (self.home_tab, "home", "Início"),
             (self.settings_tab, "connections", "Conexões"),
             (self.schedule_tab, "schedule", "Agendamento"),
@@ -618,7 +652,9 @@ class MainWindow(QMainWindow):
             button = QToolButton()
             button.setIcon(tab_icon(icon_name))
             button.setIconSize(QSize(24, 24))
-            button.setToolTip(tooltip)
+            button.setText(name)
+            button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             button.setCheckable(True)
             button.setChecked(index == 0)
             self.nav_buttons.addButton(button, index)
@@ -646,11 +682,7 @@ class MainWindow(QMainWindow):
         # Sempre exibe o que está salvo em disco, exceto ao sair do minimizado:
         # nesse caso a janela não fechou e o que foi digitado continua valendo
         if not event.spontaneous():
-            self.load_connections()
-            self.load_schedule()
-            self.load_system()
-            for name, _widget, state, _save in self._sections():
-                self._saved_states[name] = state()
+            self._reload_saved()
         if QWinTaskbarButton is not None and self._taskbar is None:
             self._taskbar = QWinTaskbarButton(self)
             self._taskbar.setWindow(self.windowHandle())
@@ -664,6 +696,13 @@ class MainWindow(QMainWindow):
         if self.confirm_unsaved():
             self._status_timer.stop()
             self.hide()
+
+    def _reload_saved(self) -> None:
+        self.load_connections()
+        self.load_schedule()
+        self.load_system()
+        for name, _widget, state, _save in self._sections():
+            self._saved_states[name] = state()
 
     # ------------------------------------------------------------------ alterações não salvas
     def _sections(self):
@@ -741,12 +780,13 @@ class MainWindow(QMainWindow):
         field.setFocus()
         status.show_message(history.LEVEL_ERROR, message)
 
-    def _ports_valid(self, status: StatusLine, *fields: QLineEdit) -> bool:
+    @staticmethod
+    def _ports_valid(status: StatusLine, *fields: QLineEdit) -> bool:
         for field in fields:
             try:
                 parse_port(field.text())
             except ValueError:
-                self._field_error(status, field, "Porta inválida: use um número de 1 a 65535 ou deixe vazio.")
+                MainWindow._field_error(status, field, "Porta inválida: use um número de 1 a 65535 ou deixe vazio.")
                 return False
         return True
 
@@ -852,7 +892,7 @@ class MainWindow(QMainWindow):
                 child = QTreeWidgetItem([
                     f"{database.engine}: {database.database}",
                     "Concluído" if database.success else "Falhou",
-                    history.format_size(database.size) if database.success else database.message,
+                    database_detail(database),
                 ])
                 child.setIcon(1, result_icon(database.success))
                 child.setToolTip(2, database.message)
@@ -984,7 +1024,8 @@ class MainWindow(QMainWindow):
         if not creds.user:
             self._field_error(self.mysql_status, self.mysql_username, "Informe o usuário do MySQL.")
             return
-        self._start_connection_test(self.test_mysql_button, self.mysql_status, "MySQL", probe_mysql, creds)
+        start_connection_test(self._connection_tests, self.test_mysql_button, self.mysql_status, "MySQL",
+                              probe_mysql, creds)
 
     # Função para testar a conexão com SQL Server
     def test_sql_server_connection(self) -> None:
@@ -994,29 +1035,8 @@ class MainWindow(QMainWindow):
         if not creds.server:
             self._field_error(self.sql_status, self.sql_server, "Informe o servidor do SQL Server.")
             return
-        self._start_connection_test(self.test_sql_server_button, self.sql_status, "SQL Server",
-                                    probe_sqlserver, creds)
-
-    def _start_connection_test(self, button: QPushButton, status: StatusLine, engine: str, probe, creds) -> None:
-        label = button.text()
-        button.setEnabled(False)
-        button.setText("Testando...")
-        status.show_message(history.LEVEL_RUNNING, f"Conectando ao {engine}...")
-        task = ConnectionTest(probe, creds)
-
-        def finished(version: str, error) -> None:
-            self._connection_tests.remove(task)
-            button.setText(label)
-            button.setEnabled(True)
-            if error is not None:
-                status.show_message(history.LEVEL_ERROR, connection_error_text(engine, error), str(error))
-            else:
-                details = f" Versão do servidor: {version}" if version else ""
-                status.show_message(history.LEVEL_OK, f"Conexão bem-sucedida.{details}")
-
-        task.signals.finished.connect(finished)
-        self._connection_tests.append(task)
-        QThreadPool.globalInstance().start(task)
+        start_connection_test(self._connection_tests, self.test_sql_server_button, self.sql_status, "SQL Server",
+                              probe_sqlserver, creds)
 
     # Função para salvar as credenciais das conexões aos bancos de dados
     def save_credentials(self) -> bool:
@@ -1170,8 +1190,24 @@ class MainWindow(QMainWindow):
         self.checkbox_mysql.setChecked(settings.use_mysql)
         self.checkbox_sql_server.setChecked(settings.use_sql_server)
 
+    def _confirm_retention(self, settings, days: int) -> bool:
+        """Reduzir o prazo apaga backups que já existem: avisa quantos antes de salvar."""
+        if not days or (settings.retention_days and days >= settings.retention_days):
+            return True
+        count = len(retention_preview(settings, days))
+        if not count:
+            return True
+        answer = QMessageBox.question(
+            self, "Reduzir retenção",
+            f"Com o prazo de {days} dia(s), {count} backup(s) antigo(s) serão apagados a partir do próximo "
+            "backup bem-sucedido. O mais recente de cada banco é mantido.\n\nDeseja continuar?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return answer == QMessageBox.Yes
+
     def save_schedule(self, show_message: bool = True) -> bool:
         settings = load_settings()  # preserva as demais seções (caminhos)
+        if not self._confirm_retention(settings, self.retention_spin.value()):
+            return False
         self._sync_rule_states()
         settings.rules = self._rules
         settings.retention_days = self.retention_spin.value()
@@ -1275,20 +1311,33 @@ class MainWindow(QMainWindow):
         layout.addWidget(folder_box)
 
         tools_box = QGroupBox("Ferramentas")
-        tools = QHBoxLayout(tools_box)
-        for label, icon_name, slot in (
+        tools = QGridLayout(tools_box)
+        for index, (label, icon_name, slot) in enumerate((
+            ("Restaurar backup", "restore", lambda: RestoreDialog(self).exec_()),
+            ("Configuração guiada", "wizard", self.open_setup_wizard),
+            ("Novo usuário", "register", lambda: RegistrationScreen(self).exec_()),
             ("Pasta de backups", "browse", lambda: self._open(load_settings().backup_root)),
             ("Pasta de logs", "logs", lambda: self._open(LOGS_DIR)),
-            ("Novo usuário", "register", lambda: RegistrationScreen(self).exec_()),
-        ):
-            tools.addWidget(make_button(label, icon_name, slot))
-        tools.addStretch(1)
+        )):
+            tools.addWidget(make_button(label, icon_name, slot), index // 3, index % 3)
         layout.addWidget(tools_box)
 
         layout.addStretch(1)
         info = muted_label(f"DBKeeper {__version__}  •  {BASE_DIR}")
         layout.addWidget(info)
         return tab
+
+    def open_setup_wizard(self) -> None:
+        if not self.confirm_unsaved():
+            return
+        SetupWizard(self.scheduler, self).exec_()
+        self._reload_saved()
+        self.refresh_status()
+
+    def offer_setup(self) -> None:
+        """Chamado após o login: abre o assistente só em uma instalação nova."""
+        if needs_setup(load_settings()):
+            self.open_setup_wizard()
 
     def _browse_backup_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Pasta de backups", self.backup_dir.text() or str(BASE_DIR))
@@ -1354,3 +1403,497 @@ class MainWindow(QMainWindow):
         self._mark_saved("Pasta de backups")
         self.system_status.show_message(history.LEVEL_OK, f"Os backups serão gravados em {settings.backup_root}")
         return True
+
+
+# ---------------------------------------------------------------------------
+# Restauração
+# ---------------------------------------------------------------------------
+class RestoreDialog(QDialog):
+    """Restaura um backup. O padrão é um banco novo; substituir exige digitar o nome do banco."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Restaurar backup")
+        self.setWindowIcon(QIcon(image("app_icon.ico")))
+        self.setMinimumSize(640, 560)
+        self._task = None
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        source_box = QGroupBox("Backup")
+        source = QVBoxLayout(source_box)
+        self.backups = QTreeWidget()
+        self.backups.setHeaderLabels(["Data", "Banco", "Tipo", "Tamanho"])
+        self.backups.setRootIsDecorated(False)
+        self.backups.setUniformRowHeights(True)
+        self.backups.header().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.backups.header().setStretchLastSection(False)
+        self.backups.itemSelectionChanged.connect(self._suggest_target)
+        self.backups_empty = muted_label("Nenhum backup encontrado na pasta de backups.")
+        source.addWidget(self.backups, 1)
+        source.addWidget(self.backups_empty)
+        self.browse_button = make_button("Escolher outro arquivo", "browse", self._browse)
+        source.addWidget(self.browse_button, alignment=Qt.AlignLeft)
+        layout.addWidget(source_box, 1)
+
+        target_box = QGroupBox("Destino")
+        target = QVBoxLayout(target_box)
+        self.new_radio = QRadioButton("Criar um banco novo (recomendado)")
+        self.new_radio.setChecked(True)
+        self.replace_radio = QRadioButton("Substituir um banco existente")
+        self.replace_radio.toggled.connect(self._suggest_target)
+        self.target = make_field("database", "Nome do banco de destino")
+        self.target.textChanged.connect(self._update_state)
+        self.replace_warning = muted_label(
+            "O conteúdo atual deste banco será apagado e as conexões abertas nele serão encerradas. "
+            "Antes disso, o programa grava uma cópia de segurança dele.")
+        self.replace_warning.setStyleSheet(f"color: {WARNING};")
+        self.confirm = make_field("edit", "Digite o nome do banco para confirmar")
+        self.confirm.textChanged.connect(self._update_state)
+        for widget in (self.new_radio, self.replace_radio, self.target, self.replace_warning, self.confirm):
+            target.addWidget(widget)
+        layout.addWidget(target_box)
+
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(False)
+        self.progress.setRange(0, 0)
+        self.progress.hide()
+        layout.addWidget(self.progress)
+        self.status = StatusLine()
+        layout.addWidget(self.status)
+
+        self.restore_button = make_button("Restaurar", "restore", self._start, primary=True)
+        self.close_button = make_button("Fechar", "quit", self.reject)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(self.close_button)
+        row.addWidget(self.restore_button)
+        layout.addLayout(row)
+
+        self._load_backups()
+
+    def _add_backup(self, backup: BackupFile, index: int) -> QTreeWidgetItem:
+        item = QTreeWidgetItem([backup.moment.strftime("%d/%m/%Y %H:%M"), backup.database, backup.engine,
+                                history.format_size(backup.size)])
+        item.setData(0, Qt.UserRole, backup)
+        item.setToolTip(1, str(backup.path))
+        self.backups.insertTopLevelItem(index, item)
+        return item
+
+    def _load_backups(self) -> None:
+        self.backups.clear()
+        backups = available_backups(load_settings())
+        for index, backup in enumerate(backups):
+            self._add_backup(backup, index)
+        self.backups.setVisible(bool(backups))
+        self.backups_empty.setVisible(not backups)
+        for column in (0, 2, 3):
+            self.backups.resizeColumnToContents(column)
+        self._suggest_target()
+
+    def _browse(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Selecione o backup", str(load_settings().backup_root),
+                                              "Backups (*.sql *.bak)")
+        if not path:
+            return
+        chosen = Path(path)
+        engine = ENGINE_SQLSERVER if chosen.suffix.lower() == ".bak" else ENGINE_MYSQL
+        database = re.sub(r"_\d{4}-\d{2}-\d{2}_\d{4}$", "", chosen.stem)
+        stat = chosen.stat()
+        item = self._add_backup(BackupFile(engine, database, datetime.fromtimestamp(stat.st_mtime), chosen,
+                                           stat.st_size), 0)
+        self.backups.show()
+        self.backups_empty.hide()
+        self.backups.setCurrentItem(item)
+
+    def _selected(self) -> "BackupFile | None":
+        items = self.backups.selectedItems()
+        return items[0].data(0, Qt.UserRole) if items else None
+
+    def _suggest_target(self) -> None:
+        backup = self._selected()
+        replacing = self.replace_radio.isChecked()
+        self.replace_warning.setVisible(replacing)
+        self.confirm.setVisible(replacing)
+        self.confirm.clear()
+        if backup is not None:
+            self.target.setText(original_database(backup.database) if replacing
+                                else suggested_target(backup.database))
+        self._update_state()
+
+    def _update_state(self) -> None:
+        target = self.target.text().strip()
+        problem = target_problem(target) if target else None
+        if problem:
+            self.status.show_message(history.LEVEL_WARNING, problem)
+        elif self._task is None:
+            self.status.hide()
+        confirmed = not self.replace_radio.isChecked() or self.confirm.text().strip() == target
+        self.restore_button.setEnabled(
+            self._task is None and self._selected() is not None and bool(target) and not problem and confirmed)
+
+    def _set_running(self, running: bool) -> None:
+        self.progress.setVisible(running)
+        for widget in (self.backups, self.browse_button, self.new_radio, self.replace_radio, self.target,
+                       self.confirm, self.close_button):
+            widget.setEnabled(not running)
+
+    def _start(self) -> None:
+        backup = self._selected()
+        request = RestoreRequest(backup.engine, str(backup.path), self.target.text().strip(),
+                                 self.replace_radio.isChecked())
+        self._task = BackgroundCall(restore_backup, request)
+        self._task.signals.finished.connect(self._on_finished)
+        self._set_running(True)
+        self._update_state()
+        self.status.show_message(history.LEVEL_RUNNING, f"Restaurando no banco '{request.target}'...")
+        QThreadPool.globalInstance().start(self._task)
+
+    def _on_finished(self, message: str, error) -> None:
+        self._task = None
+        self._set_running(False)
+        self._load_backups()  # a cópia de segurança passa a aparecer na lista
+        if error is not None:
+            self.status.show_message(history.LEVEL_ERROR, str(error))
+        else:
+            self.status.show_message(history.LEVEL_OK, message)
+
+    def reject(self) -> None:
+        if self._task is None:  # uma restauração em andamento não pode perder quem mostra o resultado
+            super().reject()
+
+
+# ---------------------------------------------------------------------------
+# Assistente de primeira configuração
+# ---------------------------------------------------------------------------
+class SetupWizard(QDialog):
+    """Do banco de dados à agenda, em três passos, para quem está implantando o programa."""
+    STEPS = ("Bancos de dados", "Agenda e pasta", "Conferir")
+    DAY_PRESETS = (("Todos os dias", DAYS), ("Segunda a sexta", DAYS[:5]))
+    DEFAULT_TIME = QTime(22, 0)
+
+    def __init__(self, scheduler: BackupScheduler, parent=None):
+        super().__init__(parent)
+        self.scheduler = scheduler
+        self.setWindowTitle("Configuração guiada")
+        self.setWindowIcon(QIcon(image("app_icon.ico")))
+        self.setMinimumSize(680, 500)
+        self._connection_tests = []
+        self._settings = load_settings()
+        box = get_secret_box(self)
+        creds = load_credentials(box) if box else DbCredentials()
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        self.step_label = QLabel()
+        step_font = QFont(self.step_label.font())
+        step_font.setPointSize(12)
+        step_font.setBold(True)
+        self.step_label.setFont(step_font)
+        layout.addWidget(self.step_label)
+
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self._build_databases(creds))
+        self.pages.addWidget(self._build_schedule())
+        self.pages.addWidget(self._build_summary())
+        layout.addWidget(self.pages, 1)
+
+        self.status = StatusLine()
+        layout.addWidget(self.status)
+
+        self.skip_button = make_button("Configurar depois", "quit", self.skip)
+        self.back_button = make_button("Voltar", "back", self._back)
+        self.next_button = make_button("Avançar", "next", self._next, primary=True)
+        row = QHBoxLayout()
+        row.addWidget(self.skip_button)
+        row.addStretch()
+        row.addWidget(self.back_button)
+        row.addWidget(self.next_button)
+        layout.addLayout(row)
+        self._show_page(0)
+
+    def _build_databases(self, creds: DbCredentials) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(muted_label("Marque os bancos que este computador deve copiar. "
+                                     "Depois de preencher, use Testar conexão para conferir os dados."))
+        groups = QHBoxLayout()
+        groups.setSpacing(16)
+
+        self.mysql_check = QCheckBox("Fazer backup do MySQL")
+        self.mysql_check.setChecked(self._settings.use_mysql)
+        box = QVBoxLayout()
+        box.addWidget(self.mysql_check)
+        mysql_box = QGroupBox("MySQL")
+        fields = QVBoxLayout(mysql_box)
+        self.mysql_host = MainWindow._add_field(fields, "server", "Host (padrão: localhost)")
+        self.mysql_user = MainWindow._add_field(fields, "user", "Usuário")
+        self.mysql_password = MainWindow._add_field(fields, "password", "Senha", True)
+        self.mysql_port = MainWindow._add_field(fields, "port", f"Porta (padrão: {DEFAULT_MYSQL_PORT})")
+        self.mysqldump_path = MainWindow._add_path_field(fields, "executable", "Caminho do mysqldump.exe",
+                                                         self._browse_mysqldump)
+        detected = find_mysqldump()
+        self.mysqldump_path.setPlaceholderText(
+            f"Automático: {detected}" if detected else "mysqldump.exe não encontrado - informe o caminho")
+        self.mysqldump_path.setText(self._settings.mysqldump_path)
+        fields.addStretch(1)
+        self.mysql_status = StatusLine()
+        fields.addWidget(self.mysql_status)
+        self.mysql_test = make_button("Testar conexão", "test", self._test_mysql)
+        fields.addWidget(self.mysql_test)
+        box.addWidget(mysql_box, 1)
+        groups.addLayout(box, 1)
+        m = creds.mysql
+        self.mysql_host.setText(m.host if m.host != "localhost" else "")
+        self.mysql_user.setText(m.user)
+        self.mysql_password.setText(m.password)
+        self.mysql_port.setText(str(m.port) if m.port != DEFAULT_MYSQL_PORT else "")
+
+        self.sql_check = QCheckBox("Fazer backup do SQL Server")
+        self.sql_check.setChecked(self._settings.use_sql_server)
+        box = QVBoxLayout()
+        box.addWidget(self.sql_check)
+        sql_box = QGroupBox("SQL Server")
+        fields = QVBoxLayout(sql_box)
+        self.sql_server = MainWindow._add_field(fields, "server", "Servidor (ex.: localhost\\SQLEXPRESS)")
+        self.sql_user = MainWindow._add_field(fields, "user", "Usuário (vazio = autenticação do Windows)")
+        self.sql_password = MainWindow._add_field(fields, "password", "Senha", True)
+        self.sql_database = MainWindow._add_field(fields, "database", "Banco de dados")
+        self.sql_port = MainWindow._add_field(fields, "port", "Porta (opcional)")
+        fields.addStretch(1)
+        self.sql_status = StatusLine()
+        fields.addWidget(self.sql_status)
+        self.sql_test = make_button("Testar conexão", "test", self._test_sql)
+        fields.addWidget(self.sql_test)
+        box.addWidget(sql_box, 1)
+        groups.addLayout(box, 1)
+        s = creds.sqlserver
+        self.sql_server.setText(s.server)
+        self.sql_user.setText(s.user)
+        self.sql_password.setText(s.password)
+        self.sql_database.setText(s.database)
+        self.sql_port.setText(str(s.port) if s.port else "")
+
+        self.mysql_check.toggled.connect(mysql_box.setEnabled)
+        self.sql_check.toggled.connect(sql_box.setEnabled)
+        mysql_box.setEnabled(self.mysql_check.isChecked())
+        sql_box.setEnabled(self.sql_check.isChecked())
+        layout.addLayout(groups, 1)
+        return page
+
+    def _build_schedule(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+
+        # Com uma agenda já criada, o assistente não mexe nela nem na retenção
+        self.schedule_box = QGroupBox("Agenda")
+        schedule = QGridLayout(self.schedule_box)
+        self.days_combo = QComboBox()
+        for label, days in self.DAY_PRESETS:
+            self.days_combo.addItem(label, days)
+        self.time_edit = QTimeEdit(self.DEFAULT_TIME)
+        self.time_edit.setDisplayFormat("HH:mm")
+        self.retention_spin = QSpinBox()
+        self.retention_spin.setRange(0, 3650)
+        self.retention_spin.setSuffix(" dia(s)")
+        self.retention_spin.setSpecialValueText("sempre (não apagar)")
+        self.retention_spin.setValue(self._settings.retention_days)
+        schedule.addWidget(QLabel("Fazer backup"), 0, 0)
+        schedule.addWidget(self.days_combo, 0, 1)
+        schedule.addWidget(QLabel("às"), 0, 2)
+        schedule.addWidget(self.time_edit, 0, 3)
+        schedule.addWidget(QLabel("Manter backups por"), 1, 0)
+        schedule.addWidget(self.retention_spin, 1, 1)
+        schedule.setColumnStretch(1, 1)
+        schedule.addWidget(muted_label("Depois, a aba Agendamento permite criar mais regras e horários."),
+                           2, 0, 1, 4)
+        layout.addWidget(self.schedule_box)
+        self.schedule_box.setVisible(not self._settings.rules)
+        if self._settings.rules:
+            layout.addWidget(muted_label(f"A agenda atual, com {len(self._settings.rules)} regra(s), "
+                                         "será mantida. Para mudá-la, use a aba Agendamento."))
+
+        folder_box = QGroupBox("Pasta de backups")
+        folder = QVBoxLayout(folder_box)
+        self.backup_dir = MainWindow._add_path_field(folder, "folder", f"Padrão: {BASE_DIR}", self._browse_folder)
+        self.backup_dir.setText(self._settings.backup_dir)
+        layout.addWidget(folder_box)
+        layout.addStretch(1)
+        return page
+
+    def _build_summary(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        self.summary.setTextFormat(Qt.PlainText)
+        layout.addWidget(self.summary)
+        layout.addSpacing(12)
+        self.run_now_check = QCheckBox("Executar o primeiro backup ao concluir")
+        self.run_now_check.setChecked(True)
+        layout.addWidget(self.run_now_check)
+        layout.addStretch(1)
+        return page
+
+    def _browse_mysqldump(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Selecione o mysqldump.exe", self.mysqldump_path.text(),
+                                              "mysqldump (mysqldump.exe);;Executáveis (*.exe)")
+        if path:
+            self.mysqldump_path.setText(str(Path(path)))
+
+    def _browse_folder(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Pasta de backups", self.backup_dir.text() or str(BASE_DIR))
+        if path:
+            self.backup_dir.setText(str(Path(path)))
+
+    # ------------------------------------------------------------------ conexões
+    def _mysql_creds(self) -> MySQLCredentials:
+        return MySQLCredentials(host=self.mysql_host.text().strip() or "localhost",
+                                user=self.mysql_user.text().strip(), password=self.mysql_password.text(),
+                                port=parse_port(self.mysql_port.text(), DEFAULT_MYSQL_PORT))
+
+    def _sql_creds(self) -> SQLServerCredentials:
+        return SQLServerCredentials(server=self.sql_server.text().strip(), user=self.sql_user.text().strip(),
+                                    password=self.sql_password.text(), database=self.sql_database.text().strip(),
+                                    port=parse_port(self.sql_port.text(), None))
+
+    def _mysql_valid(self, status: StatusLine) -> bool:
+        if not MainWindow._ports_valid(status, self.mysql_port):
+            return False
+        if not self.mysql_user.text().strip():
+            MainWindow._field_error(status, self.mysql_user, "Informe o usuário do MySQL.")
+            return False
+        return True
+
+    def _sql_valid(self, status: StatusLine) -> bool:
+        if not MainWindow._ports_valid(status, self.sql_port):
+            return False
+        if not self.sql_server.text().strip():
+            MainWindow._field_error(status, self.sql_server, "Informe o servidor do SQL Server.")
+            return False
+        if not self.sql_database.text().strip():
+            MainWindow._field_error(status, self.sql_database, "Informe o banco de dados.")
+            return False
+        return True
+
+    def _test_mysql(self) -> None:
+        if self._mysql_valid(self.mysql_status):
+            start_connection_test(self._connection_tests, self.mysql_test, self.mysql_status, "MySQL",
+                                  probe_mysql, self._mysql_creds())
+
+    def _test_sql(self) -> None:
+        if self._sql_valid(self.sql_status):
+            start_connection_test(self._connection_tests, self.sql_test, self.sql_status, "SQL Server",
+                                  probe_sqlserver, self._sql_creds())
+
+    # ------------------------------------------------------------------ navegação
+    def _show_page(self, index: int) -> None:
+        self.pages.setCurrentIndex(index)
+        self.step_label.setText(f"Passo {index + 1} de {len(self.STEPS)}: {self.STEPS[index]}")
+        self.back_button.setEnabled(index > 0)
+        self.next_button.setText("Concluir" if index == len(self.STEPS) - 1 else "Avançar")
+        self.status.hide()
+
+    def _back(self) -> None:
+        self._show_page(self.pages.currentIndex() - 1)
+
+    def _page_valid(self) -> bool:
+        if self.pages.currentIndex() == 0:
+            if not (self.mysql_check.isChecked() or self.sql_check.isChecked()):
+                self.status.show_message(history.LEVEL_ERROR, "Marque pelo menos um banco de dados.")
+                return False
+            dump_path = self.mysqldump_path.text().strip()
+            if self.mysql_check.isChecked():
+                if not self._mysql_valid(self.status):
+                    return False
+                if not find_mysqldump(dump_path):
+                    MainWindow._field_error(self.status, self.mysqldump_path, "Informe onde está o mysqldump.exe.")
+                    return False
+            return not self.sql_check.isChecked() or self._sql_valid(self.status)
+        if self.pages.currentIndex() == 1:
+            path = self.backup_dir.text().strip()
+            try:
+                if path:
+                    Path(path).mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                MainWindow._field_error(self.status, self.backup_dir,
+                                        f"Não foi possível usar esta pasta ({exc.strerror}). Escolha outra.")
+                return False
+        return True
+
+    def _next(self) -> None:
+        if not self._page_valid():
+            return
+        index = self.pages.currentIndex()
+        if index == len(self.STEPS) - 1:
+            self._finish()
+            return
+        if index == 1:
+            self.summary.setText(self._summary_text())
+        self._show_page(index + 1)
+
+    def _new_rule(self) -> ScheduleRule:
+        return ScheduleRule(days=list(self.days_combo.currentData()), times=[self.time_edit.time().toString("HH:mm")])
+
+    def _summary_text(self) -> str:
+        engines = []
+        if self.mysql_check.isChecked():
+            engines.append("MySQL: todos os bancos de usuário")
+        if self.sql_check.isChecked():
+            engines.append(f"SQL Server: {self.sql_database.text().strip()}")
+        if self._settings.rules:
+            schedule = f"{len(self._settings.rules)} regra(s) atual(is)"
+        else:
+            days = self.retention_spin.value()
+            schedule = f"{self._new_rule().describe()}; manter backups por {days} dia(s)" if days \
+                else f"{self._new_rule().describe()}; manter todos os backups"
+        folder = self.backup_dir.text().strip() or str(BASE_DIR)
+        return "\n\n".join(("Bancos\n" + "\n".join(engines), f"Agenda\n{schedule}", f"Pasta de backups\n{folder}"))
+
+    def _finish(self) -> None:
+        box = get_secret_box(self)
+        if box is None:
+            return
+        creds = load_credentials(box)
+        if self.mysql_check.isChecked():
+            creds.mysql = self._mysql_creds()
+        if self.sql_check.isChecked():
+            creds.sqlserver = self._sql_creds()
+        settings = load_settings()
+        settings.use_mysql = self.mysql_check.isChecked()
+        settings.use_sql_server = self.sql_check.isChecked()
+        settings.mysqldump_path = self.mysqldump_path.text().strip()
+        settings.backup_dir = self.backup_dir.text().strip()
+        settings.setup_done = True
+        if not settings.rules:
+            settings.rules = [self._new_rule()]
+            settings.retention_days = self.retention_spin.value()
+        try:
+            save_credentials(creds, box)
+            save_settings(settings)
+        except OSError as exc:
+            error_log.error(f"Erro ao salvar a configuração guiada: {exc}")
+            self.status.show_message(history.LEVEL_ERROR, f"Não foi possível salvar as configurações: {exc}")
+            return
+        main_log.info("Configuração guiada concluída.")
+        self.scheduler.reload(settings)
+        if self.run_now_check.isChecked():
+            self.scheduler.trigger("manual")
+        self.accept()
+
+    def skip(self) -> None:
+        settings = load_settings()
+        settings.setup_done = True  # não insiste a cada login; a aba Sistema reabre o assistente
+        try:
+            save_settings(settings)
+        except OSError as exc:
+            error_log.error(f"Erro ao salvar settings.ini: {exc}")
+        self.reject()
+
+    def closeEvent(self, event) -> None:
+        self.skip()
+        super().closeEvent(event)

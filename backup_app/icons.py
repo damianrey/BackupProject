@@ -66,6 +66,10 @@ _ICONS = {
     "open": "ph.app-window",
     "quit": "ph.sign-out",
     "clock": "ph.clock",
+    "restore": "ph.clock-counter-clockwise",
+    "wizard": "ph.compass",
+    "next": "ph.arrow-right",
+    "back": "ph.arrow-left",
     # Situação
     "ok": "ph.check-circle",
     "info": "ph.info",
@@ -168,10 +172,10 @@ QPushButton[flat="true"]:hover {{ text-decoration: underline; }}
 QWidget#sidebar {{ background: {SURFACE}; border-right: 1px solid {BORDER}; }}
 QWidget#sidebar QToolButton {{
     background: transparent; border: none; border-left: 2px solid transparent;
-    border-right: 2px solid transparent; padding: 12px 14px;
+    border-right: 2px solid transparent; padding: 8px 6px; font-size: 8pt; color: {MUTED};
 }}
 QWidget#sidebar QToolButton:hover {{ background: #2b2e33; }}
-QWidget#sidebar QToolButton:checked {{ background: {WINDOW}; border-left-color: {ACCENT}; }}
+QWidget#sidebar QToolButton:checked {{ background: {WINDOW}; border-left-color: {ACCENT}; color: {TEXT}; }}
 QLabel[muted="true"] {{ color: {MUTED}; }}
 QLineEdit[invalid="true"] {{ border-color: {DANGER}; }}
 QFrame#statusCard {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 6px; }}

@@ -31,6 +31,7 @@ class DatabaseEntry:
     success: bool
     message: str
     size: Optional[int] = None
+    verified: bool = False
 
 
 @dataclass
@@ -71,7 +72,7 @@ def record(report) -> None:
         "summary": report.summary(),
         "databases": [
             {"engine": r.engine, "database": r.database, "success": r.success,
-             "message": r.message, "size": _file_size(r.path)}
+             "message": r.message, "size": _file_size(r.path), "verified": r.verified}
             for r in report.results
         ],
     }

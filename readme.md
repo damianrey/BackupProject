@@ -17,7 +17,10 @@ Um programa de backup para agendar backups diários no **SQL Server** e **MySQL*
 - **Automatic Windows startup** (`HKCU\...\Run` via `pythonw.exe`, toggled directly from the **Sistema** tab).
 - **Rule-based scheduling with multiple backups per day**: each rule picks weekdays and either fixed times (e.g. `08:00, 12:00, 18:00`) or an interval (e.g. every 3h from 07:00 to 19:00); overlapping rules never duplicate a run. Runs without freezing the UI (`QTimer` scheduler + single-worker `QThreadPool`). Old `[Days]/[Time]` settings are migrated automatically.
 - **Home screen and backup history**: the **Início** tab shows at a glance whether backups are up to date and the progress per database (also on the taskbar button); results, including `--backup` runs, are kept in `content/history.jsonl`.
-- **Timestamped backups + retention**: files are named `database_YYYY-MM-DD_HHMM.sql/.bak`; after each successful backup, files older than *N* days are deleted (the newest backup of each database is always kept).
+- **Timestamped backups + retention**: files are named `database_YYYY-MM-DD_HHMM.sql/.bak`; after each successful backup, files older than *N* days are deleted (the newest backup of each database is always kept). Shortening the period first tells how many backups will be deleted.
+- **Backup verification**: every backup is checked before it counts as successful (`RESTORE VERIFYONLY` on SQL Server, the end-of-dump marker on MySQL), and old backups are only deleted after a verified one.
+- **Guided restore** (**Sistema** tab): restores into a new database by default. Replacing an existing one requires typing its name and first takes a verified safety copy. `.sql` files that pick their own database are refused.
+- **Guided setup**: on a new installation, three steps cover the databases, schedule and backup folder, and can be reopened from the **Sistema** tab.
 - **Headless CLI mode (`--backup`)** to run backups without opening the GUI — ideal for **Windows Task Scheduler** when backups must run even with no user logged in.
 - **MySQL & SQL Server support**:
   - **MySQL (5.1 to 8.x)** via `mysqldump` (prioritizes MySQL 5.1 paths or custom path, connects using `utf8` charset for 5.1 compatibility, passes credentials via temporary `--defaults-extra-file`, handles `COLUMN_STATISTICS` / `--routines` version differences, and writes atomically via `.part` before replacing `.sql`).
@@ -34,7 +37,10 @@ Um programa de backup para agendar backups diários no **SQL Server** e **MySQL*
 - **Inicialização automática com o Windows** (`HKCU\...\Run` usando `pythonw.exe`, configurável direto na aba **Sistema**).
 - **Agendamento por regras, com vários backups por dia**: cada regra define os dias da semana e horários fixos (ex.: `08:00, 12:00, 18:00`) ou um intervalo (ex.: a cada 3h das 07:00 às 19:00); regras sobrepostas não duplicam backups. Roda sem congelar a interface (agendador via `QTimer` + fila de execução em worker único). Configurações antigas (`[Days]/[Time]`) são migradas automaticamente.
 - **Tela inicial e histórico**: a aba **Início** mostra de imediato se os backups estão em dia e o progresso por banco (também no botão da barra de tarefas); os resultados, inclusive do `--backup`, ficam em `content/history.jsonl`.
-- **Backups com data/hora + retenção**: arquivos no formato `banco_AAAA-MM-DD_HHMM.sql/.bak`; após cada backup bem-sucedido, os arquivos com mais de *N* dias são apagados (o backup mais recente de cada banco é sempre mantido).
+- **Backups com data/hora + retenção**: arquivos no formato `banco_AAAA-MM-DD_HHMM.sql/.bak`; após cada backup bem-sucedido, os arquivos com mais de *N* dias são apagados (o backup mais recente de cada banco é sempre mantido). Reduzir o prazo avisa antes quantos backups serão apagados.
+- **Verificação dos backups**: cada backup é conferido antes de contar como sucesso (`RESTORE VERIFYONLY` no SQL Server, marca de fim do dump no MySQL), e os antigos só são apagados depois de um backup verificado.
+- **Restauração guiada** (aba **Sistema**): restaura em um banco novo por padrão. Substituir um banco existente exige digitar o nome dele e antes grava uma cópia de segurança verificada. Arquivos `.sql` que escolhem o próprio banco são recusados.
+- **Configuração guiada**: em uma instalação nova, três passos cobrem bancos, agenda e pasta de backups, e podem ser reabertos pela aba **Sistema**.
 - **Modo linha de comando (`--backup`)** para rodar backups sem interface gráfica — ideal para o **Agendador de Tarefas do Windows** quando o backup precisa rodar mesmo sem usuário logado.
 - **Suporte a MySQL e SQL Server**:
   - **MySQL (5.1 a 8.x)** via `mysqldump` (prioriza instalações 5.1 ou caminho configurável, conecta com charset `utf8` compatível com 5.1, passa credenciais via `--defaults-extra-file` temporário sem expor a senha na linha de comando, trata diferenças de versão como `COLUMN_STATISTICS` / `--routines` e grava em `.part` antes de substituir o `.sql`).
@@ -126,6 +132,7 @@ DBKeeper/
 │   ├── settings.py         # Read/write for settings.ini and dbcredentials.ini
 │   ├── backup.py           # MySQL and SQL Server backup engine (Qt-free)
 │   ├── history.py          # Backup history and the overall status shown on the home screen
+│   ├── restore.py          # Backup restore (no Qt)
 │   ├── scheduler.py        # Rule-based weekly scheduler + single-worker QThreadPool
 │   ├── startup.py          # Windows Run registry integration (HKCU\...\Run)
 │   ├── icons.py            # Phosphor icons (QtAwesome) and the dark theme / stylesheet
