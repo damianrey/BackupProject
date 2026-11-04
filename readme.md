@@ -24,7 +24,7 @@ Um programa de backup para agendar backups diários no **SQL Server** e **MySQL*
 - **Headless CLI mode (`--backup`)** to run backups without opening the GUI — ideal for **Windows Task Scheduler** when backups must run even with no user logged in.
 - **MySQL & SQL Server support**:
   - **MySQL (5.1 to 8.x)** via `mysqldump` (prioritizes MySQL 5.1 paths or custom path, connects using `utf8` charset for 5.1 compatibility, passes credentials via temporary `--defaults-extra-file`, handles `COLUMN_STATISTICS` / `--routines` version differences, and writes atomically via `.part` before replacing `.sql`).
-  - **SQL Server (2008 / 2008 R2 to 2019)** via `pyodbc` (`BACKUP DATABASE ... WITH INIT, FORMAT`, automatically negotiates installed ODBC Drivers — Driver 17, 18 with `Encrypt=no` fallback for 2008 TLS, 13, 11, Native Client 10/11, or legacy `SQL Server` — supporting SQL or Windows Authentication and named instances).
+  - **SQL Server (2008 / 2008 R2 to 2019)** via `pyodbc` (backs up every online user database on the instance, skipping `master`, `model`, `msdb` and `tempdb`, with `BACKUP DATABASE ... WITH INIT, FORMAT`; automatically negotiates installed ODBC Drivers — Driver 17, 18 with `Encrypt=no` fallback for 2008 TLS, 13, 11, Native Client 10/11, or legacy `SQL Server` — supporting SQL or Windows Authentication and named instances).
 - **Security & reliability**:
   - Automatic Fernet key generation on first run, protected by Windows **DPAPI** (`content/fernet.key`).
   - User passwords hashed with **PBKDF2-SHA256** + salt (`content/credentials.json`), with automatic migration from legacy credentials.
@@ -44,7 +44,7 @@ Um programa de backup para agendar backups diários no **SQL Server** e **MySQL*
 - **Modo linha de comando (`--backup`)** para rodar backups sem interface gráfica — ideal para o **Agendador de Tarefas do Windows** quando o backup precisa rodar mesmo sem usuário logado.
 - **Suporte a MySQL e SQL Server**:
   - **MySQL (5.1 a 8.x)** via `mysqldump` (prioriza instalações 5.1 ou caminho configurável, conecta com charset `utf8` compatível com 5.1, passa credenciais via `--defaults-extra-file` temporário sem expor a senha na linha de comando, trata diferenças de versão como `COLUMN_STATISTICS` / `--routines` e grava em `.part` antes de substituir o `.sql`).
-  - **SQL Server (2008 / 2008 R2 a 2019)** via `pyodbc` (`BACKUP DATABASE ... WITH INIT, FORMAT`, negocia automaticamente entre os drivers ODBC instalados — Driver 17, 18 com fallback `Encrypt=no` para SQL 2008, 13, 11, Native Client 10/11 ou `SQL Server` nativo — com suporte a autenticação SQL ou Windows e instâncias nomeadas).
+  - **SQL Server (2008 / 2008 R2 a 2019)** via `pyodbc` (copia todos os bancos de usuário online da instância, ignorando `master`, `model`, `msdb` e `tempdb`, com `BACKUP DATABASE ... WITH INIT, FORMAT`; negocia automaticamente entre os drivers ODBC instalados — Driver 17, 18 com fallback `Encrypt=no` para SQL 2008, 13, 11, Native Client 10/11 ou `SQL Server` nativo — com suporte a autenticação SQL ou Windows e instâncias nomeadas).
 - **Segurança e confiabilidade**:
   - Chave Fernet gerada automaticamente na primeira execução e protegida com **DPAPI** do Windows (`content/fernet.key`).
   - Senhas de usuários da interface armazenadas com hash **PBKDF2-SHA256** + salt (`content/credentials.json`), com migração automática de senhas antigas.

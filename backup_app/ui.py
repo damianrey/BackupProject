@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - módulo exclusivo do Windows
     QWinTaskbarButton = None
 
 from . import __version__, history, startup, users
-from .backup import connect_mysql, connect_sqlserver, find_mysqldump, retention_preview
+from .backup import connect_mysql, connect_sqlserver, find_mysqldump, list_sqlserver_databases, retention_preview
 from .icons import ACCENT, DANGER, MUTED, ON_ACCENT, SUCCESS, WARNING, icon, tab_icon
 from .log_config import error_log, main_log
 from .paths import BASE_DIR, LOGS_DIR, image
@@ -197,8 +197,8 @@ def probe_mysql(creds: MySQLCredentials) -> str:
 
 
 def probe_sqlserver(creds: SQLServerCredentials) -> str:
-    """Conecta ao SQL Server e devolve a versão e a edição do servidor."""
-    conn = connect_sqlserver(creds)
+    """Conecta ao SQL Server e devolve a versão, a edição e quantos bancos entram no backup."""
+    conn = connect_sqlserver(creds, database="master")
     try:
         cur = conn.cursor()
         cur.execute(
@@ -206,10 +206,12 @@ def probe_sqlserver(creds: SQLServerCredentials) -> str:
             "CAST(SERVERPROPERTY('Edition') AS VARCHAR(100))"
         )
         row = cur.fetchone()
+        count = len(list_sqlserver_databases(cur))
         cur.close()
+        version = ""
         if row and row[0]:
-            return f"{row[0]} ({row[1]})" if row[1] else str(row[0])
-        return ""
+            version = f"{row[0]} ({row[1]})" if row[1] else str(row[0])
+        return f"{version or 'desconhecida'}. Bancos para backup: {count}"
     finally:
         conn.close()
 
@@ -716,7 +718,7 @@ class MainWindow(QMainWindow):
     def _connections_state(self) -> tuple:
         return tuple(field.text() for field in (
             self.mysql_host, self.mysql_username, self.mysql_password, self.mysql_port, self.mysqldump_path,
-            self.sql_server, self.sql_username, self.sql_password, self.sql_database, self.sql_port,
+            self.sql_server, self.sql_username, self.sql_password, self.sql_port,
             self.sqlserver_backup_dir,
         ))
 
@@ -932,7 +934,6 @@ class MainWindow(QMainWindow):
         self.sql_server = self._add_field(box, "server", "Servidor (ex.: localhost\\SQLEXPRESS)")
         self.sql_username = self._add_field(box, "user", "Usuário (vazio = autenticação do Windows)")
         self.sql_password = self._add_field(box, "password", "Senha", True)
-        self.sql_database = self._add_field(box, "database", "Banco de dados")
         self.sql_port = self._add_field(box, "port", "Porta (opcional)")
         self.sqlserver_backup_dir = self._add_path_field(
             box, "folder", "Pasta de backup no servidor (opcional)", self._browse_sqlserver_dir)
@@ -946,8 +947,7 @@ class MainWindow(QMainWindow):
         # O resultado de um teste deixa de valer quando os dados mudam
         for status, fields in (
             (self.mysql_status, (self.mysql_host, self.mysql_username, self.mysql_password, self.mysql_port)),
-            (self.sql_status, (self.sql_server, self.sql_username, self.sql_password, self.sql_database,
-                               self.sql_port)),
+            (self.sql_status, (self.sql_server, self.sql_username, self.sql_password, self.sql_port)),
         ):
             for field in fields:
                 field.textEdited.connect(lambda _text, line=status: line.hide())
@@ -996,7 +996,6 @@ class MainWindow(QMainWindow):
         self.sql_server.setText(s.server)
         self.sql_username.setText(s.user)
         self.sql_password.setText(s.password)
-        self.sql_database.setText(s.database)
         self.sql_port.setText(str(s.port) if s.port else "")
 
     def _mysql_from_fields(self) -> MySQLCredentials:
@@ -1012,7 +1011,6 @@ class MainWindow(QMainWindow):
             server=self.sql_server.text().strip(),
             user=self.sql_username.text().strip(),
             password=self.sql_password.text(),
-            database=self.sql_database.text().strip(),
             port=parse_port(self.sql_port.text(), None),
         )
 
@@ -1659,7 +1657,6 @@ class SetupWizard(QDialog):
         self.sql_server = MainWindow._add_field(fields, "server", "Servidor (ex.: localhost\\SQLEXPRESS)")
         self.sql_user = MainWindow._add_field(fields, "user", "Usuário (vazio = autenticação do Windows)")
         self.sql_password = MainWindow._add_field(fields, "password", "Senha", True)
-        self.sql_database = MainWindow._add_field(fields, "database", "Banco de dados")
         self.sql_port = MainWindow._add_field(fields, "port", "Porta (opcional)")
         fields.addStretch(1)
         self.sql_status = StatusLine()
@@ -1672,7 +1669,6 @@ class SetupWizard(QDialog):
         self.sql_server.setText(s.server)
         self.sql_user.setText(s.user)
         self.sql_password.setText(s.password)
-        self.sql_database.setText(s.database)
         self.sql_port.setText(str(s.port) if s.port else "")
 
         self.mysql_check.toggled.connect(mysql_box.setEnabled)
@@ -1758,7 +1754,7 @@ class SetupWizard(QDialog):
 
     def _sql_creds(self) -> SQLServerCredentials:
         return SQLServerCredentials(server=self.sql_server.text().strip(), user=self.sql_user.text().strip(),
-                                    password=self.sql_password.text(), database=self.sql_database.text().strip(),
+                                    password=self.sql_password.text(),
                                     port=parse_port(self.sql_port.text(), None))
 
     def _mysql_valid(self, status: StatusLine) -> bool:
@@ -1774,9 +1770,6 @@ class SetupWizard(QDialog):
             return False
         if not self.sql_server.text().strip():
             MainWindow._field_error(status, self.sql_server, "Informe o servidor do SQL Server.")
-            return False
-        if not self.sql_database.text().strip():
-            MainWindow._field_error(status, self.sql_database, "Informe o banco de dados.")
             return False
         return True
 
@@ -1844,7 +1837,7 @@ class SetupWizard(QDialog):
         if self.mysql_check.isChecked():
             engines.append("MySQL: todos os bancos de usuário")
         if self.sql_check.isChecked():
-            engines.append(f"SQL Server: {self.sql_database.text().strip()}")
+            engines.append("SQL Server: todos os bancos de usuário")
         if self._settings.rules:
             schedule = f"{len(self._settings.rules)} regra(s) atual(is)"
         else:

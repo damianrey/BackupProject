@@ -35,6 +35,7 @@ SQL_FOLDER = "sql"
 
 # Bancos internos do MySQL que não devem ser copiados
 MYSQL_EXCLUDED_DATABASES = {"information_schema", "performance_schema", "mysql", "sys", "test"}
+SQLSERVER_SYSTEM_DATABASES = {"master", "model", "msdb", "tempdb"}
 
 # Caminhos comuns do MySQL 5.1 (32 e 64 bits) têm prioridade por ser a versão majoritária
 LEGACY_MYSQLDUMP_PATHS = (
@@ -653,60 +654,85 @@ def backup_and_verify(cursor, database: str, destination: str) -> None:
     execute_all(cursor, f"RESTORE VERIFYONLY FROM DISK = {disk}")
 
 
-def backup_sqlserver(settings: AppSettings, creds: SQLServerCredentials, stamp: str) -> List[BackupResult]:
-    database = creds.database
-    if not creds.configured:
-        return [
-            BackupResult(
-                "SQL Server",
-                database or "-",
-                False,
-                "SQL Server: servidor e banco de dados precisam estar configurados.",
-            )
-        ]
+def list_sqlserver_databases(cursor) -> List[str]:
+    """Bancos de usuário que podem ir para o backup, em ordem alfabética.
 
+    Ficam de fora os bancos de sistema, os snapshots, o banco de distribuição da
+    replicação e os que não estão ONLINE (offline, restaurando, suspeitos) ou a
+    que o login não tem acesso. Funciona de SQL Server 2008 a 2019+.
+    """
+    excluded = ", ".join(quote_literal(name) for name in sorted(SQLSERVER_SYSTEM_DATABASES))
+    cursor.execute(
+        "SELECT name, state_desc, HAS_DBACCESS(name) FROM sys.databases "
+        f"WHERE name NOT IN ({excluded}) AND source_database_id IS NULL AND is_distributor = 0 "
+        "ORDER BY name"
+    )
+    databases = []
+    for name, state, access in cursor.fetchall():
+        if state != "ONLINE":
+            main_log.info(f"SQL Server: banco '{name}' ignorado no backup (estado {state}).")
+        elif not access:
+            main_log.info(f"SQL Server: banco '{name}' ignorado no backup (o usuário não tem acesso).")
+        else:
+            databases.append(name)
+    return databases
+
+
+def _backup_one_sqlserver(cursor, settings: AppSettings, database: str, stamp: str,
+                          ver_info: str) -> BackupResult:
     destination = sqlserver_backup_path(settings, backup_file_name(database, stamp, ".bak"))
     try:
-        connection = connect_sqlserver(creds, database="master", autocommit=True)
-        try:
-            cursor = connection.cursor()
-            try:
-                cursor.execute("SELECT CAST(SERVERPROPERTY('ProductVersion') AS VARCHAR(50))")
-                ver_row = cursor.fetchone()
-                sql_version = str(ver_row[0]) if ver_row and ver_row[0] else ""
-            except Exception:
-                sql_version = ""
-
-            backup_and_verify(cursor, database, destination)
-            cursor.close()
-        finally:
-            connection.close()
+        backup_and_verify(cursor, database, destination)
     except Exception as exc:
-        return [
-            BackupResult(
-                "SQL Server",
-                database,
-                False,
-                f"Falha no backup da base de dados {database} do SQL. Erro: {exc}",
-            )
-        ]
+        return BackupResult("SQL Server", database, False,
+                            f"Falha no backup da base de dados {database} do SQL. Erro: {exc}")
     # A retenção só roda se esta máquina enxerga o arquivo recém-gravado: é a
     # garantia de que a pasta local é a mesma em que o SQL Server gravou.
     if Path(destination).is_file():
         apply_retention(Path(destination).parent, database, ".bak", settings.retention_days)
     elif settings.retention_days > 0:
         main_log.info(f"Retenção do SQL Server ignorada: '{destination}' não é acessível desta máquina.")
-    ver_info = f" (versão {sql_version})" if sql_version else ""
-    return [
-        BackupResult(
-            "SQL Server",
-            database,
-            True,
-            f"SQL{ver_info}: backup de {database} realizado e verificado em '{destination}'!",
-            destination,
-            verified=True,
-        )
-    ]
+    return BackupResult("SQL Server", database, True,
+                        f"SQL{ver_info}: backup de {database} realizado e verificado em '{destination}'!",
+                        destination, verified=True)
+
+
+def backup_sqlserver(settings: AppSettings, creds: SQLServerCredentials, stamp: str,
+                     on_progress: Optional[ProgressCallback] = None) -> List[BackupResult]:
+    """Faz o backup de todos os bancos de usuário da instância, como no MySQL."""
+    if not creds.configured:
+        return [BackupResult("SQL Server", "-", False, "SQL Server: servidor não configurado.")]
+
+    try:
+        connection = connect_sqlserver(creds, database="master", autocommit=True)
+    except Exception as exc:
+        return [BackupResult("SQL Server", "-", False, f"Erro ao conectar ao SQL Server: {exc}")]
+    results = []
+    try:
+        cursor = connection.cursor()
+        try:
+            cursor.execute("SELECT CAST(SERVERPROPERTY('ProductVersion') AS VARCHAR(50))")
+            ver_row = cursor.fetchone()
+            sql_version = str(ver_row[0]) if ver_row and ver_row[0] else ""
+        except Exception:
+            sql_version = ""
+        main_log.info(f"Conexão com SQL Server bem sucedida! Versão do servidor: {sql_version or 'desconhecida'}")
+        ver_info = f" (versão {sql_version})" if sql_version else ""
+        try:
+            targets = list_sqlserver_databases(cursor)
+        except Exception as exc:
+            return [BackupResult("SQL Server", "-", False, f"Erro ao listar os bancos do SQL Server: {exc}")]
+        for index, database in enumerate(targets):
+            if on_progress is not None:
+                on_progress(f"SQL Server: {database}", index, len(targets))
+            results.append(_backup_one_sqlserver(cursor, settings, database, stamp, ver_info))
+        cursor.close()
+    finally:
+        connection.close()
+    if not results:
+        results.append(BackupResult("SQL Server", "-", False,
+                                    "SQL Server: nenhum banco de dados de usuário encontrado."))
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -733,6 +759,8 @@ def run_backup(origin: str = "manual", on_progress: Optional[ProgressCallback] =
             box = SecretBox(load_key(create=False))
             creds = load_credentials(box)
             stamp = report.started.strftime(STAMP_FORMAT)
+            # Cada servidor só sabe quantos bancos tem ao conectar: enquanto o MySQL
+            # roda, o SQL Server conta como uma etapa.
             sql_steps = 1 if settings.use_sql_server else 0
 
             def mysql_progress(label: str, done: int, total: int) -> None:
@@ -742,10 +770,15 @@ def run_backup(origin: str = "manual", on_progress: Optional[ProgressCallback] =
             if settings.use_mysql:
                 report.results += backup_mysql(settings, creds.mysql, stamp, mysql_progress)
             if settings.use_sql_server:
+                before = len(report.results)
+
+                def sql_progress(label: str, done: int, total: int) -> None:
+                    if on_progress is not None:
+                        on_progress(label, before + done, before + total)
+
                 if on_progress is not None:
-                    done = len(report.results)
-                    on_progress(f"SQL Server: {creds.sqlserver.database}", done, done + 1)
-                report.results += backup_sqlserver(settings, creds.sqlserver, stamp)
+                    on_progress("SQL Server: conectando", before, before + 1)
+                report.results += backup_sqlserver(settings, creds.sqlserver, stamp, sql_progress)
     except Exception as exc:
         report.error = f"Erro inesperado no backup: {exc}"
         exception_log.exception(report.error)  # traceback completo; a mensagem vai ao error.log abaixo

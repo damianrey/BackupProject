@@ -337,12 +337,12 @@ class SQLServerCredentials:
     server: str = ""
     user: str = ""        # vazio = autenticação do Windows
     password: str = ""
-    database: str = ""
+    database: str = ""    # legado: o backup copia todos os bancos da instância
     port: Optional[int] = None
 
     @property
     def configured(self) -> bool:
-        return bool(self.server and self.database)
+        return bool(self.server)
 
 
 @dataclass
